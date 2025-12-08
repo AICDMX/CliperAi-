@@ -732,19 +732,26 @@ def opcion_transcribir_video(video: Dict, state_manager):
     model_options.add_column(style="white")
     model_options.add_column(style="dim")
 
-    model_options.add_row("tiny", "Fastest", "~1min for 1hr video")
-    model_options.add_row("base", "Balanced", "~5min for 1hr video")
-    model_options.add_row("small", "Accurate", "~10min for 1hr video")
-    model_options.add_row("medium", "Very accurate", "~20min for 1hr video")
+    model_options.add_row("[t]iny", "Fastest", "~1min for 1hr video")
+    model_options.add_row("[b]ase", "Balanced", "~5min for 1hr video")
+    model_options.add_row("[s]mall", "Accurate", "~10min for 1hr video")
+    model_options.add_row("[m]edium", "Very accurate", "~20min for 1hr video")
 
     console.print(model_options)
     console.print()
 
-    model_size = Prompt.ask(
+    # Shortcut mapping for model selection
+    shortcut_map = {"t": "tiny", "b": "base", "s": "small", "m": "medium"}
+    valid_inputs = ["tiny", "base", "small", "medium", "t", "b", "s", "m"]
+
+    model_input = Prompt.ask(
         "[cyan]Model size[/cyan]",
-        choices=["tiny", "base", "small", "medium"],
+        choices=valid_inputs,
         default=suggested_model  # Usa el modelo sugerido del preset
     )
+
+    # Convert shortcut to full model name if needed
+    model_size = shortcut_map.get(model_input, model_input)
 
     # Idioma
     console.print()
