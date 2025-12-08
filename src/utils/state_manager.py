@@ -74,7 +74,8 @@ class StateManager:
         video_id: str,
         filename: str,
         content_type: str = "tutorial",
-        preset: Dict = None
+        preset: Dict = None,
+        source_path: Optional[str] = None
     ) -> None:
         """
         Registro un nuevo video en el sistema
@@ -84,6 +85,7 @@ class StateManager:
             filename: Nombre del archivo
             content_type: Tipo de contenido (podcast, tutorial, livestream, etc.)
             preset: Preset de configuración completo
+            source_path: Ruta completa del video (para videos seleccionados desde cualquier ubicación)
         """
         if video_id not in self.state:
             self.state[video_id] = {
@@ -97,6 +99,7 @@ class StateManager:
                 'clips_metadata_path': None,
                 'content_type': content_type,  # Nuevo: tipo de contenido
                 'preset': preset if preset else {},  # Nuevo: configuración
+                'source_path': source_path,  # Nuevo: ruta del archivo para videos personalizados
                 'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self._save_state()

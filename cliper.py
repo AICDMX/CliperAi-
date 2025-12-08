@@ -108,6 +108,202 @@ def escanear_videos() -> List[Dict[str, str]]:
     return videos
 
 
+def seleccionar_video_personalizado() -> Optional[Dict[str, str]]:
+    """
+    Permite al usuario seleccionar un video de cualquier ubicación.
+
+    Ofrece dos opciones:
+    1. Ingresar la ruta completa del archivo
+    2. Usar un file picker interactivo
+
+    Retorna dict con:
+    {
+        "filename": "video.mp4",
+        "path": "/full/path/to/video.mp4",
+        "video_id": "unique_id_from_filename"
+    }
+    O None si el usuario cancela
+    """
+    console.clear()
+    mostrar_banner()
+
+    console.print(Panel(
+        "[bold]Select Video File[/bold]\nChoose how you want to select your video",
+        border_style="cyan"
+    ))
+    console.print()
+
+    # Menú de opciones
+    selection_table = Table(show_header=False, box=box.ROUNDED, border_style="cyan", padding=(0, 2))
+    selection_table.add_column("Option", style="bold cyan", width=8)
+    selection_table.add_column("Description", style="white")
+    selection_table.add_row("1", "Enter file path")
+    selection_table.add_row("2", "Browse files")
+    selection_table.add_row("3", "Cancel")
+
+    console.print(selection_table)
+    console.print()
+
+    choice = Prompt.ask(
+        "[cyan]Choose method[/cyan]",
+        choices=["1", "2", "3"],
+        default="1"
+    )
+
+    if choice == "1":
+        return _seleccionar_por_ruta()
+    elif choice == "2":
+        return _seleccionar_por_explorador()
+    else:
+        return None
+
+
+def _seleccionar_por_ruta() -> Optional[Dict[str, str]]:
+    """
+    El usuario ingresa la ruta completa del archivo de video
+    """
+    console.print()
+    console.print("[dim]Enter the full path to your video file[/dim]")
+    console.print("[dim]Supported formats: MP4, MOV, AVI, MKV, WebM[/dim]\n")
+
+    ruta = Prompt.ask("[cyan]File path[/cyan]").strip()
+
+    if not ruta:
+        console.print("[yellow]No path provided[/yellow]")
+        Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
+        return None
+
+    video_path = Path(ruta)
+
+    # Validaciones
+    if not video_path.exists():
+        console.print(f"\n[red]Error: File not found[/red]\n{ruta}")
+        Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
+        return None
+
+    if not video_path.is_file():
+        console.print(f"\n[red]Error: Path is not a file[/red]")
+        Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
+        return None
+
+    # Validar extensión
+    valid_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
+    if video_path.suffix.lower() not in valid_extensions:
+        console.print(f"\n[red]Error: Unsupported file format '{video_path.suffix}'[/red]")
+        console.print(f"[dim]Supported: {', '.join(valid_extensions)}[/dim]")
+        Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
+        return None
+
+    # Crear video_id único
+    video_id = f"{video_path.stem}_custom"
+
+    console.print(f"\n[green]✓ File selected: {video_path.name}[/green]")
+    console.print(f"[dim]Size: {video_path.stat().st_size / 1024 / 1024:.2f} MB[/dim]")
+
+    Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
+
+    return {
+        "filename": video_path.name,
+        "path": str(video_path.absolute()),
+        "video_id": video_id
+    }
+
+
+def _seleccionar_por_explorador() -> Optional[Dict[str, str]]:
+    """
+    El usuario navega por el filesystem para seleccionar un archivo.
+    Implementa un file picker interactivo en terminal.
+    """
+    console.print()
+    console.print("[dim]Browsing file system...[/dim]\n")
+
+    current_dir = Path.home()  # Comenzar en el home del usuario
+    valid_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
+
+    while True:
+        # Obtener archivos y carpetas del directorio actual
+        try:
+            items = sorted(current_dir.iterdir())
+        except PermissionError:
+            console.print(f"[red]Permission denied: {current_dir}[/red]")
+            Prompt.ask("\n[dim]Press ENTER to go back[/dim]", default="")
+            continue
+
+        # Separar carpetas y videos
+        folders = [item for item in items if item.is_dir() and not item.name.startswith('.')]
+        videos = [item for item in items if item.is_file() and item.suffix.lower() in valid_extensions]
+
+        # Mostrar ubicación actual
+        console.print(f"[bold]Current location:[/bold] {current_dir}\n")
+
+        # Crear tabla de opciones
+        browser_table = Table(show_header=False, box=box.ROUNDED, border_style="cyan", padding=(0, 1))
+        browser_table.add_column("", style="cyan", width=4)
+        browser_table.add_column("Name", style="white")
+        browser_table.add_column("Type", style="dim", width=10)
+
+        option_map = {}
+        option_num = 1
+
+        # Opción para ir al directorio padre
+        if current_dir.parent != current_dir:
+            browser_table.add_row(str(option_num), "..", "[folder]")
+            option_map[str(option_num)] = ("parent", None)
+            option_num += 1
+
+        # Mostrar carpetas
+        for folder in folders[:10]:  # Limitar a 10 carpetas
+            browser_table.add_row(str(option_num), folder.name, "[folder]")
+            option_map[str(option_num)] = ("folder", folder)
+            option_num += 1
+
+        # Mostrar videos
+        for video in videos[:10]:  # Limitar a 10 videos
+            size_mb = video.stat().st_size / 1024 / 1024
+            browser_table.add_row(str(option_num), video.name, f"[video] {size_mb:.1f}MB")
+            option_map[str(option_num)] = ("file", video)
+            option_num += 1
+
+        # Opción para cancelar
+        browser_table.add_row(str(option_num), "Cancel", "[cancel]")
+        option_map[str(option_num)] = ("cancel", None)
+
+        console.print(browser_table)
+        console.print()
+
+        # Pedir selección
+        choices = list(option_map.keys())
+        selection = Prompt.ask(
+            "[cyan]Select[/cyan]",
+            choices=choices,
+            default=choices[0] if choices else "1"
+        )
+
+        action, target = option_map.get(selection, ("cancel", None))
+
+        if action == "parent":
+            current_dir = current_dir.parent
+        elif action == "folder":
+            current_dir = target
+        elif action == "file":
+            # Video seleccionado
+            video_id = f"{target.stem}_custom"
+            console.print(f"\n[green]✓ Selected: {target.name}[/green]")
+            size_mb = target.stat().st_size / 1024 / 1024
+            console.print(f"[dim]Size: {size_mb:.2f} MB[/dim]")
+
+            return {
+                "filename": target.name,
+                "path": str(target.absolute()),
+                "video_id": video_id
+            }
+        elif action == "cancel":
+            return None
+
+        console.clear()
+        mostrar_banner()
+
+
 def mostrar_videos_disponibles(videos: List[Dict], state_manager) -> Optional[Table]:
     """
     Muestro una tabla con los videos disponibles y su estado
@@ -187,15 +383,17 @@ def menu_principal(videos: List[Dict], state_manager) -> str:
     if videos:
         menu_table.add_row("1", "Process a video")
         menu_table.add_row("2", "Download new video")
-        menu_table.add_row("3", "Cleanup project data")
-        menu_table.add_row("4", "Full Pipeline (auto)")
-        menu_table.add_row("5", "Exit")
-        opciones = ["1", "2", "3", "4", "5"]
+        menu_table.add_row("3", "Select a video file")
+        menu_table.add_row("4", "Cleanup project data")
+        menu_table.add_row("5", "Full Pipeline (auto)")
+        menu_table.add_row("6", "Exit")
+        opciones = ["1", "2", "3", "4", "5", "6"]
     else:
         menu_table.add_row("1", "Download new video")
-        menu_table.add_row("2", "Cleanup project data")
-        menu_table.add_row("3", "Exit")
-        opciones = ["1", "2", "3"]
+        menu_table.add_row("2", "Select a video file")
+        menu_table.add_row("3", "Cleanup project data")
+        menu_table.add_row("4", "Exit")
+        opciones = ["1", "2", "3", "4"]
 
     console.print(Panel(menu_table, title="[bold]Main Menu[/bold]", border_style="cyan"))
     console.print()
@@ -312,6 +510,58 @@ def opcion_descargar_video(downloader, state_manager):
     Prompt.ask("[dim]Press ENTER to return to menu[/dim]", default="")
 
 
+def opcion_seleccionar_video_personalizado(state_manager):
+    """
+    Permite al usuario seleccionar un video de cualquier ubicación
+    y lo registra en el state manager para procesamiento
+    """
+    video = seleccionar_video_personalizado()
+
+    if not video:
+        console.clear()
+        mostrar_banner()
+        return
+
+    # Validar que el archivo exista (doble check)
+    video_path = Path(video['path'])
+    if not video_path.exists():
+        console.clear()
+        mostrar_banner()
+        console.print(Panel(
+            "[red]Error: File no longer exists[/red]",
+            border_style="red"
+        ))
+        Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
+        return
+
+    # Registrar el video en el state manager
+    state_manager.register_video(
+        video['video_id'],
+        video['filename'],
+        source_path=video['path']  # Guardamos la ruta del archivo
+    )
+
+    console.clear()
+    mostrar_banner()
+
+    console.print(Panel(
+        f"[green]✓ Video selected successfully[/green]\n\n"
+        f"File: {video['filename']}\n"
+        f"Location: {video['path']}",
+        title="[bold green]Success[/bold green]",
+        border_style="green"
+    ))
+
+    # Pregunto si quiere continuar con transcripción
+    console.print()
+    if Confirm.ask("[cyan]Would you like to transcribe this video now?[/cyan]"):
+        opcion_transcribir_video(video, state_manager)
+        return  # Retorno para que no pida ENTER dos veces
+
+    console.print()
+    Prompt.ask("[dim]Press ENTER to return to menu[/dim]", default="")
+
+
 def opcion_procesar_video(videos: List[Dict], state_manager):
     """
     Proceso un video existente (transcribir, generar clips, etc.)
@@ -340,6 +590,14 @@ def opcion_procesar_video(videos: List[Dict], state_manager):
     while True:
         # Obtengo el estado del video (refrescado en cada iteración)
         state = state_manager.get_video_state(video_id)
+
+        # Si el video tiene source_path (fue seleccionado desde una ubicación personalizada),
+        # lo agregamos al video_seleccionado para que funcione correctamente
+        if state and state.get('source_path'):
+            video_seleccionado['path'] = state['source_path']
+        elif 'path' not in video_seleccionado:
+            # Para videos del downloads folder, construimos la ruta
+            video_seleccionado['path'] = str(Path("downloads") / video_seleccionado['filename'])
 
         # Limpio la pantalla y muestro banner
         console.clear()
@@ -1624,21 +1882,27 @@ def main():
                 opcion_descargar_video(downloader, state_manager)
                 videos = escanear_videos()  # Reescaneo
             elif opcion == "3":
+                opcion_seleccionar_video_personalizado(state_manager)
+                videos = escanear_videos()  # Reescaneo
+            elif opcion == "4":
                 opcion_cleanup_project()
                 videos = escanear_videos()  # Reescaneo (pueden haberse eliminado)
-            elif opcion == "4":
+            elif opcion == "5":
                 console.print("\n[yellow]Full Pipeline coming soon![/yellow]")
                 Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
-            elif opcion == "5":
+            elif opcion == "6":
                 break
         else:
             if opcion == "1":
                 opcion_descargar_video(downloader, state_manager)
                 videos = escanear_videos()  # Reescaneo
             elif opcion == "2":
-                opcion_cleanup_project()
+                opcion_seleccionar_video_personalizado(state_manager)
                 videos = escanear_videos()  # Reescaneo
             elif opcion == "3":
+                opcion_cleanup_project()
+                videos = escanear_videos()  # Reescaneo
+            elif opcion == "4":
                 break
 
         console.clear()
