@@ -1,6 +1,6 @@
 [project]
 name = "cliper"
-version = "0.1.0"
+version = "1.0.0"
 description = "Herramienta para convertir videos largos en clips cortos usando ClipsAI"
 authors = [
     {name = "Tu Nombre", email = "tu@email.com"}
