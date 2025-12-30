@@ -5,9 +5,9 @@
 - [ ] need a way to easily double check and fix the captions
 - [ ] identify and add multiple human in the loop points
 - [ ] need a way to not do clipping other then to remove preamble or post amble. like words in the beging not needed or just dead space. 
-- [ ] right now videos must be in the downloads folder. so we need to make it copy the local files to there or allow files from anywhere
-- [ ] bulk process. so we do the same thing for a bunch of selected videos
-- [ ] make it so we dont have to put the videos in  a specific folder to process. we should be able to select any video and just process 
+- [x] right now videos must be in the downloads folder. so we need to make it copy the local files to there or allow files from anywhere
+- [x] bulk process. so we do the same thing for a bunch of selected videos
+- [x] make it so we dont have to put the videos in  a specific folder to process. we should be able to select any video and just process 
 - [ ] add a way to set output folder. for batching we should place the whole batch in a sub folder of that. 
 - [ ] make a prompts folder. we should keep all the prompts i md files
 - [ ] add system to pick font, color and size for subitles
