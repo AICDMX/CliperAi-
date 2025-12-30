@@ -8,8 +8,9 @@ Orquesta todo el pipeline: download → transcribe → generate clips → resize
 """
 
 import sys
+import hashlib
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env
@@ -40,6 +41,177 @@ except ImportError as e:
 
 # Console de Rich
 console = Console()
+
+SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".webm"}
+
+
+def _is_supported_video_file(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+
+
+def _short_hash(text: str, length: int = 8) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:length]
+
+
+def _compute_unique_video_id(video_path: Path, state_manager) -> str:
+    """
+    Mantiene compatibilidad con IDs viejos (stem) y evita colisiones cuando se
+    agregan archivos con el mismo nombre desde rutas distintas.
+    """
+    base = video_path.stem
+    existing = state_manager.get_video_state(base)
+    if not existing:
+        return base
+
+    existing_path = (existing.get("video_path") or "").strip()
+    if existing_path:
+        try:
+            if Path(existing_path).resolve() == video_path.resolve():
+                return base
+        except Exception:
+            pass
+
+    return f"{base}_{_short_hash(str(video_path.resolve()))}"
+
+
+def _parse_video_selection(selection: str, max_index: int) -> List[int]:
+    """
+    Parse selections like: 'all', '1,3,5-7'
+    Returns 0-based indices (sorted, unique).
+    """
+    sel = (selection or "").strip().lower()
+    if not sel:
+        return []
+    if sel in {"all", "*"}:
+        return list(range(max_index))
+
+    indices: set[int] = set()
+    parts = [p.strip() for p in sel.split(",") if p.strip()]
+    for part in parts:
+        if "-" in part:
+            a, b = [x.strip() for x in part.split("-", 1)]
+            if not a.isdigit() or not b.isdigit():
+                continue
+            start = int(a)
+            end = int(b)
+            if start > end:
+                start, end = end, start
+            for i in range(start, end + 1):
+                if 1 <= i <= max_index:
+                    indices.add(i - 1)
+        else:
+            if part.isdigit():
+                i = int(part)
+                if 1 <= i <= max_index:
+                    indices.add(i - 1)
+
+    return sorted(indices)
+
+
+def _collect_local_video_paths(input_str: str) -> Tuple[List[Path], List[str]]:
+    """
+    Accepts:
+    - A file path
+    - A folder path (adds supported video files inside)
+    - Multiple paths separated by commas
+    """
+    raw = (input_str or "").strip()
+    if not raw:
+        return [], ["No input provided"]
+
+    candidates: List[str] = [p.strip().strip('"').strip("'") for p in raw.split(",") if p.strip()]
+    paths: List[Path] = []
+    errors: List[str] = []
+
+    for candidate in candidates:
+        p = Path(candidate).expanduser()
+        if not p.exists():
+            errors.append(f"Path not found: {candidate}")
+            continue
+
+        if p.is_dir():
+            include_subfolders = Confirm.ask(
+                f"[cyan]Include subfolders for '{p}'?[/cyan]",
+                default=False
+            )
+            iterator = p.rglob("*") if include_subfolders else p.glob("*")
+            found_any = False
+            for item in iterator:
+                if _is_supported_video_file(item):
+                    paths.append(item)
+                    found_any = True
+            if not found_any:
+                errors.append(f"No supported videos found in folder: {p}")
+            continue
+
+        paths.append(p)
+
+    filtered: List[Path] = []
+    for p in paths:
+        if _is_supported_video_file(p):
+            filtered.append(p)
+        else:
+            errors.append(f"Unsupported video file: {p}")
+
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for p in filtered:
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+
+    return unique, errors
+
+
+def cargar_videos_disponibles(state_manager) -> List[Dict[str, str]]:
+    """
+    Fuente única de verdad para el UI:
+    - Descubre videos en downloads/ y los registra/actualiza en el state.
+    - Incluye videos registrados con ruta fuera del proyecto.
+    - Solo retorna videos cuyo archivo existe actualmente.
+    """
+    downloads_dir = Path("downloads")
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+
+    # Descubrir videos en downloads/
+    video_files: set[Path] = set()
+    for ext in SUPPORTED_VIDEO_EXTENSIONS:
+        video_files |= set(downloads_dir.glob(f"*{ext}"))
+        video_files |= set(downloads_dir.glob(f"*{ext.upper()}"))
+
+    for video_file in video_files:
+        video_id = _compute_unique_video_id(video_file, state_manager)
+        state_manager.register_video(
+            video_id=video_id,
+            filename=video_file.name,
+            video_path=str(video_file),
+        )
+
+    # Construir lista desde el state (incluye paths externos)
+    videos: List[Dict[str, str]] = []
+    for video_id, state in state_manager.get_all_videos().items():
+        filename = state.get("filename") or f"{video_id}.mp4"
+        video_path = state.get("video_path")
+        if not video_path:
+            fallback = Path("downloads") / filename
+            if fallback.exists():
+                video_path = str(fallback)
+                state_manager.register_video(video_id=video_id, filename=filename, video_path=video_path)
+            else:
+                continue
+
+        vp = Path(video_path)
+        if not vp.exists() or not vp.is_file():
+            continue
+
+        videos.append({"filename": filename, "path": str(vp), "video_id": video_id})
+
+    videos.sort(key=lambda v: v["filename"].lower())
+    return videos
 
 
 def mostrar_banner():
@@ -189,13 +361,13 @@ def menu_principal(videos: List[Dict], state_manager) -> str:
 
     if videos:
         menu_table.add_row("1", "Process a video")
-        menu_table.add_row("2", "Download new video")
-        menu_table.add_row("3", "Cleanup project data")
-        menu_table.add_row("4", "Full Pipeline (auto)")
+        menu_table.add_row("2", "Batch process videos")
+        menu_table.add_row("3", "Add/Download video(s)")
+        menu_table.add_row("4", "Cleanup project data")
         menu_table.add_row("5", "Exit")
         opciones = ["1", "2", "3", "4", "5"]
     else:
-        menu_table.add_row("1", "Download new video")
+        menu_table.add_row("1", "Add/Download video(s)")
         menu_table.add_row("2", "Cleanup project data")
         menu_table.add_row("3", "Exit")
         opciones = ["1", "2", "3"]
@@ -220,26 +392,22 @@ def opcion_descargar_video(downloader, state_manager):
     mostrar_banner()
 
     console.print(Panel(
-        "[bold]Add Video[/bold]\nProvide a YouTube URL or local file path",
+        "[bold]Add Video(s)[/bold]\n"
+        "Provide a YouTube URL, a local file path, a folder path, or multiple paths (comma-separated).",
         border_style="cyan"
     ))
     console.print()
 
-    input_str = Prompt.ask("[cyan]YouTube URL or file path[/cyan]").strip()
+    input_str = Prompt.ask("[cyan]YouTube URL or file/folder path[/cyan]").strip()
 
     if not input_str:
         console.print("[red]Error: No input provided[/red]")
         Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
         return
 
-    # Detect if it's a URL or local file
+    # Detect if it's a URL or local input
     is_url = input_str.startswith(('http://', 'https://', 'www.', 'youtube.com', 'youtu.be'))
-    is_local = not is_url and Path(input_str).exists() and Path(input_str).is_file()
-
-    if not is_url and not is_local:
-        console.print("[red]Error: Invalid input - not a valid URL or existing file path[/red]")
-        Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
-        return
+    is_local = not is_url
 
     # Ask for content type
     console.print()
@@ -275,14 +443,14 @@ def opcion_descargar_video(downloader, state_manager):
     console.print()
 
     try:
-        path = None
+        added_videos: List[Dict[str, str]] = []
 
         if is_url:
             # Download from YouTube
             with console.status("[cyan]Downloading video...[/cyan]", spinner="dots"):
-                path = downloader.download(input_str, quality="best")
+                downloaded_path = downloader.download(input_str, quality="best")
 
-            if not path:
+            if not downloaded_path:
                 console.print(Panel(
                     "[red]Download failed. Check the logs above.[/red]",
                     border_style="red"
@@ -290,41 +458,79 @@ def opcion_descargar_video(downloader, state_manager):
                 console.print()
                 Prompt.ask("[dim]Press ENTER to return to menu[/dim]", default="")
                 return
-        else:
-            # Use local file
-            path = str(Path(input_str).absolute())
 
-        # Register the video
-        video_file = Path(path)
-        video_id = video_file.stem
+            video_file = Path(downloaded_path)
+            video_id = _compute_unique_video_id(video_file, state_manager)
 
-        state_manager.register_video(
-            video_id,
-            video_file.name,
-            content_type=content_type,
-            preset=preset
-        )
+            state_manager.register_video(
+                video_id=video_id,
+                filename=video_file.name,
+                video_path=str(video_file),
+                content_type=content_type,
+                preset=preset
+            )
+            added_videos.append({"filename": video_file.name, "path": str(video_file), "video_id": video_id})
+        elif is_local:
+            local_paths, errors = _collect_local_video_paths(input_str)
+            if errors:
+                console.print()
+                console.print("[yellow]Input warnings:[/yellow]")
+                for e in errors[:10]:
+                    console.print(f"[dim]- {e}[/dim]")
+                if len(errors) > 10:
+                    console.print(f"[dim]... and {len(errors) - 10} more[/dim]")
+
+            if not local_paths:
+                console.print("\n[red]Error: No valid video files found[/red]")
+                Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
+                return
+
+            for p in local_paths:
+                abs_path = p.expanduser().resolve()
+                video_id = _compute_unique_video_id(abs_path, state_manager)
+                state_manager.register_video(
+                    video_id=video_id,
+                    filename=abs_path.name,
+                    video_path=str(abs_path),
+                    content_type=content_type,
+                    preset=preset
+                )
+                added_videos.append({"filename": abs_path.name, "path": str(abs_path), "video_id": video_id})
 
         console.clear()
         mostrar_banner()
 
+        if len(added_videos) == 1:
+            v = added_videos[0]
+            panel_body = (
+                f"[green]✓ Video added successfully[/green]\n\n"
+                f"File: {v['filename']}\n"
+                f"Location: {v['path']}"
+            )
+        else:
+            sample = "\n".join([f"• {v['filename']}" for v in added_videos[:5]])
+            panel_body = (
+                f"[green]✓ Videos added successfully[/green]\n\n"
+                f"Added: {len(added_videos)} video(s)\n\n"
+                f"{sample}"
+            )
+            if len(added_videos) > 5:
+                panel_body += f"\n[dim]... and {len(added_videos) - 5} more[/dim]"
+
         console.print(Panel(
-            f"[green]✓ Video added successfully[/green]\n\n"
-            f"File: {video_file.name}\n"
-            f"Location: {path}",
+            panel_body,
             title="[bold green]Success[/bold green]",
             border_style="green"
         ))
 
-        # Ask if they want to transcribe now
+        # Optional immediate batch processing
         console.print()
-        if Confirm.ask("[cyan]Would you like to transcribe this video now?[/cyan]"):
-            video_dict = {
-                'filename': video_file.name,
-                'path': path,
-                'video_id': video_id
-            }
-            opcion_transcribir_video(video_dict, state_manager)
+        if Confirm.ask("[cyan]Batch process these videos now?[/cyan]", default=False):
+            opcion_procesar_videos_en_lote(
+                videos=cargar_videos_disponibles(state_manager),
+                state_manager=state_manager,
+                preselected_video_ids=[v["video_id"] for v in added_videos]
+            )
             return
 
     except KeyboardInterrupt:
@@ -452,6 +658,412 @@ def opcion_procesar_video(videos: List[Dict], state_manager):
                 # Continúa el loop para refrescar el menu
             elif action == "2":
                 return  # Back to main menu
+
+
+def opcion_procesar_videos_en_lote(
+    videos: List[Dict],
+    state_manager,
+    preselected_video_ids: Optional[List[str]] = None
+):
+    """
+    Procesa múltiples videos con la misma configuración (transcribe/generate/export).
+    """
+    console.clear()
+    mostrar_banner()
+
+    if not videos:
+        console.print("[yellow]No videos available[/yellow]")
+        Prompt.ask("\n[dim]Press ENTER to return[/dim]", default="")
+        return
+
+    if preselected_video_ids:
+        by_id = {v["video_id"]: v for v in videos}
+        selected = [by_id[vid] for vid in preselected_video_ids if vid in by_id]
+    else:
+        console.print("[bold]Select videos to process:[/bold]\n")
+        for idx, video in enumerate(videos, 1):
+            console.print(f"  {idx}. {video['filename']}")
+        console.print()
+
+        selection = Prompt.ask(
+            "[cyan]Selection (e.g. 1,3-5 or 'all')[/cyan]",
+            default="all"
+        )
+        indices = _parse_video_selection(selection, len(videos))
+        selected = [videos[i] for i in indices]
+
+    if not selected:
+        console.print("[yellow]No videos selected[/yellow]")
+        Prompt.ask("\n[dim]Press ENTER to return[/dim]", default="")
+        return
+
+    console.clear()
+    mostrar_banner()
+
+    console.print(Panel(
+        f"[bold]Batch Processing[/bold]\n\nSelected: {len(selected)} video(s)",
+        border_style="cyan"
+    ))
+    console.print()
+
+    actions_table = Table(show_header=False, box=box.ROUNDED, border_style="cyan", padding=(0, 2))
+    actions_table.add_column("Option", style="bold cyan", width=8)
+    actions_table.add_column("Description", style="white")
+    actions_table.add_row("1", "Transcribe all (same model/language)")
+    actions_table.add_row("2", "Generate clips all (same durations)")
+    actions_table.add_row("3", "Export clips all (same export settings)")
+    actions_table.add_row("4", "Back")
+    console.print(actions_table)
+    console.print()
+
+    action = Prompt.ask("[bold cyan]Choose an action[/bold cyan]", choices=["1", "2", "3", "4"], default="1")
+    if action == "4":
+        return
+
+    if action == "1":
+        _batch_transcribe(selected, state_manager)
+    elif action == "2":
+        _batch_generate_clips(selected, state_manager)
+    elif action == "3":
+        _batch_export_clips(selected, state_manager)
+
+
+def _batch_transcribe(selected: List[Dict[str, str]], state_manager):
+    console.print("[bold]Transcription Settings:[/bold]\n")
+
+    model_options = Table(show_header=False, box=None, padding=(0, 2))
+    model_options.add_column(style="cyan")
+    model_options.add_column(style="white")
+    model_options.add_column(style="dim")
+    model_options.add_row("\\[t]iny", "Fastest", "~1min for 1hr video")
+    model_options.add_row("\\[b]ase", "Balanced", "~5min for 1hr video")
+    model_options.add_row("\\[s]mall", "Accurate", "~10min for 1hr video")
+    model_options.add_row("\\[m]edium", "Very accurate", "~20min for 1hr video")
+    console.print(model_options)
+    console.print()
+
+    shortcut_map = {"t": "tiny", "b": "base", "s": "small", "m": "medium"}
+    valid_inputs = ["tiny", "base", "small", "medium", "t", "b", "s", "m"]
+    model_input = Prompt.ask("[cyan]Model size[/cyan]", choices=valid_inputs, default="base")
+    model_size = shortcut_map.get(model_input, model_input)
+
+    console.print()
+    language_input = Prompt.ask("[cyan]Language (or 'auto' to detect)[/cyan]", default="auto").strip()
+    language = None if language_input.lower() == "auto" else language_input
+
+    skip_done = Confirm.ask("[cyan]Skip videos already transcribed?[/cyan]", default=True)
+
+    console.print()
+    if not Confirm.ask(f"[cyan]Start transcription for {len(selected)} video(s)?[/cyan]", default=True):
+        console.print("[yellow]Cancelled[/yellow]")
+        return
+
+    console.print("\n[cyan]Loading Whisper model...[/cyan]")
+    transcriber = Transcriber(model_size=model_size)
+
+    ok = 0
+    skipped = 0
+    failed = 0
+    for video in selected:
+        video_id = video["video_id"]
+        state = state_manager.get_video_state(video_id) or {}
+        if skip_done and state.get("transcribed"):
+            skipped += 1
+            console.print(f"[dim]Skipping (already transcribed): {video['filename']}[/dim]")
+            continue
+
+        try:
+            console.print(f"\n[cyan]Transcribing: {video['filename']}[/cyan]")
+            transcript_path = transcriber.transcribe(
+                video_path=video["path"],
+                language=language,
+                skip_if_exists=False
+            )
+            if transcript_path:
+                state_manager.mark_transcribed(video_id, transcript_path)
+                ok += 1
+            else:
+                failed += 1
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            failed += 1
+            console.print(f"[red]Failed: {video['filename']} → {e}[/red]")
+
+    console.print()
+    console.print(Panel(
+        f"[green]Done[/green]\n\n"
+        f"Transcribed: {ok}\n"
+        f"Skipped: {skipped}\n"
+        f"Failed: {failed}",
+        border_style="green" if failed == 0 else "yellow"
+    ))
+
+    console.print()
+    Prompt.ask("[dim]Press ENTER to return[/dim]", default="")
+
+
+def _batch_generate_clips(selected: List[Dict[str, str]], state_manager):
+    console.print("[bold]Clip Generation Settings:[/bold]\n")
+
+    duration_options = Table(show_header=False, box=None, padding=(0, 2))
+    duration_options.add_column(style="cyan")
+    duration_options.add_column(style="white")
+    duration_options.add_column(style="dim")
+    duration_options.add_row("1", "Short clips", "30-60s (TikTok/Shorts)")
+    duration_options.add_row("2", "Medium clips", "30-90s (Reels/Stories)")
+    duration_options.add_row("3", "Long clips", "60-180s (YouTube)")
+    duration_options.add_row("4", "Custom", "Enter min/max seconds")
+    console.print(duration_options)
+    console.print()
+
+    duration_choice = Prompt.ask("[cyan]Clip duration preset[/cyan]", choices=["1", "2", "3", "4"], default="2")
+    presets = {"1": (30, 60), "2": (30, 90), "3": (60, 180)}
+    if duration_choice in presets:
+        min_duration, max_duration = presets[duration_choice]
+    else:
+        min_duration = int(Prompt.ask("[cyan]Min clip seconds[/cyan]", default="30"))
+        max_duration = int(Prompt.ask("[cyan]Max clip seconds[/cyan]", default="90"))
+
+    console.print()
+    max_clips = int(Prompt.ask("[cyan]Maximum number of clips to generate[/cyan]", default="100"))
+
+    skip_done = Confirm.ask("[cyan]Skip videos that already have clips?[/cyan]", default=True)
+
+    console.print()
+    if not Confirm.ask(f"[cyan]Start clip generation for {len(selected)} video(s)?[/cyan]", default=True):
+        console.print("[yellow]Cancelled[/yellow]")
+        return
+
+    console.print("\n[cyan]Initializing ClipsAI...[/cyan]")
+    clips_gen = ClipsGenerator(min_clip_duration=min_duration, max_clip_duration=max_duration)
+
+    ok = 0
+    skipped = 0
+    failed = 0
+    for video in selected:
+        video_id = video["video_id"]
+        state = state_manager.get_video_state(video_id) or {}
+        if skip_done and state.get("clips_generated"):
+            skipped += 1
+            console.print(f"[dim]Skipping (already has clips): {video['filename']}[/dim]")
+            continue
+
+        transcript_path = state.get("transcript_path") or state.get("transcription_path")
+        if not transcript_path or not Path(transcript_path).exists():
+            skipped += 1
+            console.print(f"[yellow]Skipping (no transcript): {video['filename']}[/yellow]")
+            continue
+
+        try:
+            console.print(f"\n[cyan]Generating clips: {video['filename']}[/cyan]")
+            clips = clips_gen.generate_clips(
+                transcript_path=transcript_path,
+                min_clips=3,
+                max_clips=max_clips
+            )
+            if clips:
+                clips_metadata_path = clips_gen.save_clips_metadata(clips=clips, video_id=video_id)
+                state_manager.mark_clips_generated(video_id, clips, clips_metadata_path)
+                ok += 1
+            else:
+                failed += 1
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            failed += 1
+            console.print(f"[red]Failed: {video['filename']} → {e}[/red]")
+
+    console.print()
+    console.print(Panel(
+        f"[green]Done[/green]\n\n"
+        f"Clips generated: {ok}\n"
+        f"Skipped: {skipped}\n"
+        f"Failed: {failed}",
+        border_style="green" if failed == 0 else "yellow"
+    ))
+
+    console.print()
+    Prompt.ask("[dim]Press ENTER to return[/dim]", default="")
+
+
+def _load_clip_styles_if_present(video_id: str) -> Optional[Dict[int, str]]:
+    copys_file = Path("output") / video_id / "copys" / "clips_copys.json"
+    if not copys_file.exists():
+        return None
+    try:
+        import json
+        with open(copys_file, "r", encoding="utf-8") as f:
+            copys_data = json.load(f)
+        classifications = copys_data.get("classification_metadata", {}).get("classifications", [])
+        if not classifications:
+            return None
+        return {int(c["clip_id"]): c["style"] for c in classifications if "clip_id" in c and "style" in c}
+    except Exception:
+        return None
+
+
+def _batch_export_clips(selected: List[Dict[str, str]], state_manager):
+    console.print("[bold]Export Settings:[/bold]\n")
+
+    aspect_options = Table(show_header=False, box=None, padding=(0, 2))
+    aspect_options.add_column(style="cyan")
+    aspect_options.add_column(style="white")
+    aspect_options.add_column(style="dim")
+    aspect_options.add_row("1", "Original", "Keep video aspect ratio (usually 16:9)")
+    aspect_options.add_row("2", "Vertical (9:16)", "For TikTok, Reels, Shorts")
+    aspect_options.add_row("3", "Square (1:1)", "For Instagram posts")
+    console.print(aspect_options)
+    console.print()
+
+    aspect_choice = Prompt.ask("[cyan]Aspect ratio[/cyan]", choices=["1", "2", "3"], default="2")
+    aspect_map = {"1": None, "2": "9:16", "3": "1:1"}
+    aspect_ratio = aspect_map[aspect_choice]
+
+    enable_face_tracking = False
+    face_tracking_strategy = "keep_in_frame"
+    face_tracking_sample_rate = 3
+    if aspect_ratio == "9:16":
+        console.print()
+        enable_face_tracking = Confirm.ask("[cyan]Enable AI face tracking (vertical only)?[/cyan]", default=False)
+        if enable_face_tracking:
+            console.print()
+            face_style = Prompt.ask("[cyan]Face tracking style[/cyan]", choices=["1", "2"], default="1")
+            face_tracking_strategy = "keep_in_frame" if face_style == "1" else "centered"
+            console.print()
+            advanced = Confirm.ask("[dim]Configure advanced sampling rate?[/dim]", default=False)
+            if advanced:
+                face_tracking_sample_rate = int(Prompt.ask("Frame sample rate (every N frames)", default="3"))
+
+    console.print()
+    add_logo = Confirm.ask("[cyan]Add logo overlay to clips?[/cyan]", default=False)
+    logo_path = "assets/logo.png"
+    logo_position = "top-right"
+    logo_scale = 0.1
+    if add_logo:
+        advanced_branding = Confirm.ask(
+            "\n[dim]Configure advanced logo settings (path, position, scale)?[/dim]",
+            default=False
+        )
+        if advanced_branding:
+            logo_path = Prompt.ask("Path to logo file", default=logo_path)
+            logo_position = Prompt.ask(
+                "Logo position",
+                choices=["top-right", "top-left", "bottom-right", "bottom-left"],
+                default=logo_position
+            )
+            logo_scale = float(Prompt.ask("Logo scale (e.g., 0.1)", default=str(logo_scale)))
+
+    console.print()
+    add_subtitles = Confirm.ask("[cyan]Add burned-in subtitles (English)?[/cyan]", default=True)
+    subtitle_style = "small"
+    if add_subtitles:
+        console.print()
+        style_options = Table(show_header=False, box=None, padding=(0, 2))
+        style_options.add_column(style="cyan")
+        style_options.add_column(style="white")
+        style_options.add_column(style="dim")
+        style_options.add_row("1", "Default (18px)", "White text, medium size")
+        style_options.add_row("2", "Bold (22px)", "Bold white text")
+        style_options.add_row("3", "Yellow (20px)", "Yellow text (classic)")
+        style_options.add_row("4", "TikTok (20px)", "Centered top")
+        style_options.add_row("5", "Small (10px)", "Very small, positioned higher")
+        style_options.add_row("6", "Tiny (8px)", "Extra tiny, positioned higher")
+        console.print(style_options)
+        console.print()
+        style_choice = Prompt.ask("[cyan]Subtitle style[/cyan]", choices=["1", "2", "3", "4", "5", "6"], default="5")
+        style_map = {"1": "default", "2": "bold", "3": "yellow", "4": "tiktok", "5": "small", "6": "tiny"}
+        subtitle_style = style_map[style_choice]
+
+    console.print()
+    organize_by_style = Confirm.ask(
+        "[cyan]Organize by style when classifications exist?[/cyan]",
+        default=True
+    )
+
+    console.print()
+    export_all = Confirm.ask("[cyan]Export all clips per video?[/cyan]", default=True)
+    max_per_video = None
+    if not export_all:
+        max_per_video = int(Prompt.ask("[cyan]How many clips per video?[/cyan]", default="10"))
+
+    console.print()
+    if not Confirm.ask(f"[cyan]Start export for {len(selected)} video(s)?[/cyan]", default=True):
+        console.print("[yellow]Export cancelled[/yellow]")
+        return
+
+    exporter = VideoExporter(output_dir="output")
+
+    ok = 0
+    skipped = 0
+    failed = 0
+    for video in selected:
+        video_id = video["video_id"]
+        state = state_manager.get_video_state(video_id) or {}
+
+        if not state.get("clips_generated"):
+            skipped += 1
+            console.print(f"[yellow]Skipping (no clips): {video['filename']}[/yellow]")
+            continue
+
+        clips = state.get("clips") or []
+        if not clips:
+            skipped += 1
+            console.print(f"[yellow]Skipping (empty clips list): {video['filename']}[/yellow]")
+            continue
+
+        clips_to_export = clips if max_per_video is None else clips[:max_per_video]
+
+        transcript_path = state.get("transcript_path") or state.get("transcription_path")
+        if add_subtitles and (not transcript_path or not Path(transcript_path).exists()):
+            skipped += 1
+            console.print(f"[yellow]Skipping (missing transcript for subtitles): {video['filename']}[/yellow]")
+            continue
+
+        clip_styles = _load_clip_styles_if_present(video_id) if organize_by_style else None
+
+        try:
+            console.print(f"\n[cyan]Exporting clips: {video['filename']}[/cyan]")
+            exported_paths = exporter.export_clips(
+                video_path=video["path"],
+                clips=clips_to_export,
+                aspect_ratio=aspect_ratio,
+                video_name=video_id,
+                add_subtitles=add_subtitles,
+                transcript_path=transcript_path,
+                subtitle_style=subtitle_style,
+                organize_by_style=organize_by_style and bool(clip_styles),
+                clip_styles=clip_styles,
+                enable_face_tracking=enable_face_tracking,
+                face_tracking_strategy=face_tracking_strategy,
+                face_tracking_sample_rate=face_tracking_sample_rate,
+                add_logo=add_logo,
+                logo_path=logo_path,
+                logo_position=logo_position,
+                logo_scale=logo_scale
+            )
+            if exported_paths:
+                state_manager.mark_clips_exported(video_id, exported_paths, aspect_ratio=aspect_ratio)
+                ok += 1
+            else:
+                failed += 1
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            failed += 1
+            console.print(f"[red]Failed: {video['filename']} → {e}[/red]")
+
+    console.print()
+    console.print(Panel(
+        f"[green]Done[/green]\n\n"
+        f"Exported: {ok}\n"
+        f"Skipped: {skipped}\n"
+        f"Failed: {failed}",
+        border_style="green" if failed == 0 else "yellow"
+    ))
+
+    console.print()
+    Prompt.ask("[dim]Press ENTER to return[/dim]", default="")
 
 
 def opcion_transcribir_video(video: Dict, state_manager):
@@ -1629,14 +2241,9 @@ def main():
         ))
         sys.exit(1)
 
-    # Escaneo videos existentes
-    console.print("[cyan]Scanning downloads/ folder...[/cyan]")
-    videos = escanear_videos()
-
-    # Registro videos que no están en el state
-    for video in videos:
-        if not state_manager.get_video_state(video['video_id']):
-            state_manager.register_video(video['video_id'], video['filename'])
+    # Cargar videos (downloads/ + rutas externas registradas)
+    console.print("[cyan]Loading videos...[/cyan]")
+    videos = cargar_videos_disponibles(state_manager)
 
     if videos:
         console.print(f"[green]Found {len(videos)} video(s)[/green]\n")
@@ -1652,23 +2259,23 @@ def main():
             if opcion == "1":
                 opcion_procesar_video(videos, state_manager)
             elif opcion == "2":
-                opcion_descargar_video(downloader, state_manager)
-                videos = escanear_videos()  # Reescaneo
+                opcion_procesar_videos_en_lote(videos, state_manager)
+                videos = cargar_videos_disponibles(state_manager)
             elif opcion == "3":
-                opcion_cleanup_project()
-                videos = escanear_videos()  # Reescaneo (pueden haberse eliminado)
+                opcion_descargar_video(downloader, state_manager)
+                videos = cargar_videos_disponibles(state_manager)
             elif opcion == "4":
-                console.print("\n[yellow]Full Pipeline coming soon![/yellow]")
-                Prompt.ask("\n[dim]Press ENTER to continue[/dim]", default="")
+                opcion_cleanup_project()
+                videos = cargar_videos_disponibles(state_manager)
             elif opcion == "5":
                 break
         else:
             if opcion == "1":
                 opcion_descargar_video(downloader, state_manager)
-                videos = escanear_videos()  # Reescaneo
+                videos = cargar_videos_disponibles(state_manager)
             elif opcion == "2":
                 opcion_cleanup_project()
-                videos = escanear_videos()  # Reescaneo
+                videos = cargar_videos_disponibles(state_manager)
             elif opcion == "3":
                 break
 
