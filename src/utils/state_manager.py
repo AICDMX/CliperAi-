@@ -73,6 +73,7 @@ class StateManager:
         self,
         video_id: str,
         filename: str,
+        video_path: Optional[str] = None,
         content_type: str = "tutorial",
         preset: Dict = None
     ) -> None:
@@ -82,12 +83,16 @@ class StateManager:
         Args:
             video_id: ID único del video
             filename: Nombre del archivo
+            video_path: Ruta al archivo de video (absoluta o relativa)
             content_type: Tipo de contenido (podcast, tutorial, livestream, etc.)
             preset: Preset de configuración completo
         """
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
         if video_id not in self.state:
             self.state[video_id] = {
                 'filename': filename,
+                'video_path': video_path,
                 'downloaded': True,
                 'transcribed': False,
                 'transcription_path': None,
@@ -97,9 +102,46 @@ class StateManager:
                 'clips_metadata_path': None,
                 'content_type': content_type,  # Nuevo: tipo de contenido
                 'preset': preset if preset else {},  # Nuevo: configuración
-                'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'last_updated': now
             }
             self._save_state()
+            return
+
+        # Si ya existe, solo actualizo metadata sin resetear progreso
+        updated = False
+        existing = self.state[video_id]
+
+        if filename and existing.get('filename') != filename:
+            existing['filename'] = filename
+            updated = True
+
+        if video_path:
+            existing_path = existing.get('video_path')
+            if existing_path != video_path:
+                existing['video_path'] = video_path
+                updated = True
+
+        if content_type and existing.get('content_type') != content_type:
+            existing['content_type'] = content_type
+            updated = True
+
+        if preset:
+            existing['preset'] = preset
+            updated = True
+
+        if updated:
+            existing['last_updated'] = now
+            self._save_state()
+
+
+    def get_video_path(self, video_id: str) -> Optional[str]:
+        """
+        Obtengo la ruta al archivo de video (si está registrada)
+        """
+        state = self.get_video_state(video_id)
+        if not state:
+            return None
+        return state.get('video_path')
 
 
     def mark_transcribed(self, video_id: str, transcription_path: str) -> None:

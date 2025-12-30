@@ -9,11 +9,12 @@
 - **Inputs:** `state_file: str` (optional)
 - **Outputs:** None (loads existing state or creates new)
 
-**Function:** `register_video(video_id: str, filename: str, content_type: str = "tutorial", preset: Dict = None) -> None`
+**Function:** `register_video(video_id: str, filename: str, video_path: Optional[str] = None, content_type: str = "tutorial", preset: Dict = None) -> None`
 - **Purpose:** Registers a new video in project state
 - **Inputs:**
   - `video_id: str`
   - `filename: str`
+  - `video_path: Optional[str]` (absolute or relative path to the video file)
   - `content_type: str` (optional: "podcast", "tutorial", "livestream", etc.)
   - `preset: Dict` (optional configuration preset)
 - **Outputs:** None (updates state file)
@@ -62,6 +63,11 @@
     "last_updated": str
   }
   ```
+
+**Function:** `get_video_path(video_id: str) -> Optional[str]`
+- **Purpose:** Returns the stored path for a video file (if registered)
+- **Inputs:** `video_id: str`
+- **Outputs:** `Optional[str]`
 
 **Function:** `get_all_videos() -> Dict`
 - **Purpose:** Gets all videos in project state
