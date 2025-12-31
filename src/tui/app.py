@@ -50,6 +50,62 @@ class AddVideosModal(ModalScreen[Optional[Dict[str, object]]]):
             self.dismiss({"url": url, "paths": paths, "recursive": recursive})
 
 
+class ProcessShortsModal(ModalScreen[Optional[Dict[str, object]]]):
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel"),
+    ]
+
+    def __init__(self, *, title: str, choices: List[str]):
+        super().__init__()
+        self._title = title
+        self._choices = choices
+        self._choice_key_to_path: Dict[str, str] = {}
+
+    def on_mount(self) -> None:
+        table = self.query_one("#choices", DataTable)
+        table.cursor_type = "row"
+        table.focus()
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._title, id="title")
+        yield Static("Input to process as a short:", classes="label")
+        table = DataTable(id="choices")
+        table.add_columns("Source")
+        table.add_row("Full video", key="__full__")
+        self._choice_key_to_path.clear()
+        for idx, path in enumerate(self._choices):
+            key = f"__choice_{idx}__"
+            self._choice_key_to_path[key] = str(path)
+            table.add_row(str(path), key=key)
+        yield table
+        with Horizontal(classes="buttons"):
+            yield Button("Process", id="process", variant="primary")
+            yield Button("Cancel", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        if event.button.id == "process":
+            table = self.query_one("#choices", DataTable)
+            key = None
+            if table.cursor_row is not None:
+                if hasattr(table, "get_row_key"):
+                    key = table.get_row_key(table.cursor_row)  # type: ignore[attr-defined]
+                else:
+                    try:
+                        key = list(getattr(table, "rows", {}).keys())[int(table.cursor_row)]
+                    except Exception:
+                        key = None
+            value = getattr(key, "value", None) if key is not None else None
+            selected_key = str(value) if value is not None else "__full__"
+            if selected_key == "__full__":
+                input_path = None
+            else:
+                input_path = self._choice_key_to_path.get(selected_key)
+            self.dismiss({"input_path": input_path})
+
+
 class CliperTUI(App):
     TITLE = "CLIPER"
     SUB_TITLE = "Video Clipper (Textual)"
@@ -75,6 +131,7 @@ class CliperTUI(App):
         Binding("t", "enqueue_transcribe", "Transcribe"),
         Binding("c", "enqueue_clips", "Clips"),
         Binding("e", "enqueue_export", "Export"),
+        Binding("p", "enqueue_process_shorts", "Process Shorts"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -134,6 +191,8 @@ class CliperTUI(App):
                 parts.append(f"Clips: {len(state.get('clips', []) or [])}")
             if state.get("clips_exported"):
                 parts.append("Exported")
+            if state.get("shorts_exported"):
+                parts.append("Short exported")
             status = " | ".join(parts) if parts else "Ready"
             marker = "✓" if video["video_id"] in self.selected_video_ids else ""
             table.add_row(marker, video["filename"], status, key=video["video_id"])
@@ -251,14 +310,14 @@ class CliperTUI(App):
             return [self.selected_video_id]
         return []
 
-    def _enqueue_job(self, steps: List[JobStep]) -> None:
+    def _enqueue_job(self, steps: List[JobStep], *, settings: Optional[Dict[str, object]] = None) -> None:
         video_ids = self._selected_or_current_video_ids()
         if not video_ids:
             self.query_one("#logs", RichLog).write("[yellow]No videos selected.[/yellow]")
             return
 
         job_id = self.state_manager.create_job_id()
-        spec = JobSpec(job_id=job_id, video_ids=video_ids, steps=steps, settings={})
+        spec = JobSpec(job_id=job_id, video_ids=video_ids, steps=steps, settings=dict(settings or {}))
         self.state_manager.enqueue_job(spec.to_dict(), initial_status={"state": "pending", "progress_current": 0, "progress_total": len(video_ids) * len(steps)})
         self.refresh_jobs()
         self._maybe_start_next_job()
@@ -271,6 +330,40 @@ class CliperTUI(App):
 
     def action_enqueue_export(self) -> None:
         self._enqueue_job([JobStep.EXPORT_CLIPS])
+
+    async def action_enqueue_process_shorts(self) -> None:
+        video_ids = self._selected_or_current_video_ids()
+        if not video_ids:
+            self.query_one("#logs", RichLog).write("[yellow]No videos selected.[/yellow]")
+            return
+
+        # Keep this flow explicit: transcription + shorts export, no analysis / clip generation.
+        if len(video_ids) != 1:
+            self._enqueue_job([JobStep.TRANSCRIBE, JobStep.EXPORT_SHORTS])
+            return
+
+        video_id = video_ids[0]
+        state = self.state_manager.get_video_state(video_id) or {}
+        exported_clips = state.get("exported_clips") or []
+        if not exported_clips:
+            self._enqueue_job([JobStep.TRANSCRIBE, JobStep.EXPORT_SHORTS])
+            return
+
+        await self.push_screen(
+            ProcessShortsModal(title="Process Shorts", choices=[str(p) for p in exported_clips]),
+            callback=lambda result: self._on_process_shorts_dismissed(video_id, result),
+        )
+
+    def _on_process_shorts_dismissed(self, video_id: str, result: Optional[Dict[str, object]]) -> None:
+        if result is None:
+            return
+
+        input_path = result.get("input_path")
+        settings: Dict[str, object] = {}
+        if input_path:
+            settings = {"shorts": {"input_paths": {video_id: str(input_path)}}}
+
+        self._enqueue_job([JobStep.TRANSCRIBE, JobStep.EXPORT_SHORTS], settings=settings)
 
     def _maybe_start_next_job(self) -> None:
         if self._running_job_id is not None:
@@ -361,6 +454,7 @@ class CliperTUI(App):
             f"Transcribed: {bool(state.get('transcribed'))}",
             f"Clips generated: {bool(state.get('clips_generated'))}",
             f"Clips exported: {bool(state.get('clips_exported'))}",
+            f"Short exported: {bool(state.get('shorts_exported'))}",
         ]
         details.update("\n".join(lines))
 

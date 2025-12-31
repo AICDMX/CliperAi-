@@ -51,6 +51,8 @@ class JobRunner:
             self._step_generate_clips(job_id=job_id, video_id=video_id, settings=settings.get("clips") or {})
         elif step == JobStep.EXPORT_CLIPS:
             self._step_export_clips(job_id=job_id, video_id=video_id, settings=settings.get("export") or {})
+        elif step == JobStep.EXPORT_SHORTS:
+            self._step_export_shorts(job_id=job_id, video_id=video_id, settings=settings)
         elif step == JobStep.DOWNLOAD:
             raise ValueError("DOWNLOAD is not supported as a job step; use Add Videos to download and register.")
         else:
@@ -169,3 +171,78 @@ class JobRunner:
         self.state_manager.mark_clips_exported(video_id, exported_paths, aspect_ratio=settings.get("aspect_ratio"))
         self.emit(StateEvent(job_id=job_id, video_id=video_id, updates={"clips_exported": True, "exported_count": len(exported_paths)}))
         self.emit(LogEvent(job_id=job_id, video_id=video_id, level=LogLevel.INFO, message="Export complete"))
+
+    def _step_export_shorts(self, *, job_id: str, video_id: str, settings: Dict[str, Any]) -> None:
+        self.emit(LogEvent(job_id=job_id, video_id=video_id, level=LogLevel.INFO, message="Exporting short (full video)"))
+
+        shorts_settings = settings.get("shorts") or {}
+        skip_done = bool(shorts_settings.get("skip_done", True))
+        if self.state_manager.is_shorts_exported(video_id) and skip_done:
+            self.emit(LogEvent(job_id=job_id, video_id=video_id, level=LogLevel.INFO, message="Short already exported; skipping"))
+            return
+
+        state = self.state_manager.get_video_state(video_id) or {}
+
+        # Optional: process an already-exported clip instead of the full registered video.
+        input_paths = shorts_settings.get("input_paths") or {}
+        input_path = None
+        if isinstance(input_paths, dict):
+            candidate = input_paths.get(video_id)
+            if candidate:
+                input_path = str(candidate)
+        if not input_path:
+            input_path = str(shorts_settings.get("input_path") or "").strip() or self._get_video_path(video_id)
+
+        transcript_path = state.get("transcript_path") or state.get("transcription_path")
+        if not transcript_path or not self.state_manager.is_transcribed(video_id):
+            # Ensure transcription exists (reuses TRANSCRIBE skip behavior).
+            self._step_transcribe(job_id=job_id, video_id=video_id, settings=settings.get("transcribe") or {})
+            state = self.state_manager.get_video_state(video_id) or {}
+            transcript_path = state.get("transcript_path") or state.get("transcription_path")
+
+        if not transcript_path:
+            raise RuntimeError("No transcript_path found; run Transcribe first")
+
+        from pathlib import Path
+
+        from src.subtitle_generator import SubtitleGenerator
+        from src.video_exporter import VideoExporter
+
+        temp_dir = Path(shorts_settings.get("temp_dir") or (Path("temp") / "shorts"))
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        srt_path = temp_dir / f"{video_id}.srt"
+
+        srt_generated = SubtitleGenerator().generate_srt_from_transcript(
+            transcript_path=str(transcript_path),
+            output_path=str(srt_path),
+        )
+        if not srt_generated:
+            raise RuntimeError("Failed to generate SRT from transcript")
+
+        output_dir = shorts_settings.get("output_dir") or str(Path("output") / "shorts")
+        exporter = VideoExporter(output_dir=output_dir)
+        exported_path = exporter.export_full_video(
+            video_path=input_path,
+            video_name=video_id,
+            output_filename=str(shorts_settings.get("output_filename") or "short.mp4"),
+            srt_path=str(srt_path),
+            subtitle_style=str(shorts_settings.get("subtitle_style") or "default"),
+            add_logo=bool(shorts_settings.get("add_logo", True)),
+            logo_path=str(shorts_settings.get("logo_path") or "assets/logo.png"),
+            logo_position=str(shorts_settings.get("logo_position") or "top-right"),
+            logo_scale=(
+                0.1
+                if shorts_settings.get("logo_scale") is None
+                else float(shorts_settings.get("logo_scale"))
+            ),
+        )
+
+        self.state_manager.mark_shorts_exported(video_id, exported_path, srt_path=str(srt_path), input_path=input_path)
+        self.emit(
+            StateEvent(
+                job_id=job_id,
+                video_id=video_id,
+                updates={"shorts_exported": True, "shorts_export_path": exported_path},
+            )
+        )
+        self.emit(LogEvent(job_id=job_id, video_id=video_id, level=LogLevel.INFO, message="Short export complete"))

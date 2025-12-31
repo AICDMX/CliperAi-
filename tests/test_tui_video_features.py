@@ -76,9 +76,9 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
                 for video_id in spec.video_ids:
                     for step in spec.steps:
                         if step == JobStep.TRANSCRIBE:
-                            transcript_path = Path("temp") / "transcripts" / f"{video_id}.txt"
+                            transcript_path = Path("temp") / "transcripts" / f"{video_id}.json"
                             transcript_path.parent.mkdir(parents=True, exist_ok=True)
-                            transcript_path.write_text("dummy transcript", encoding="utf-8")
+                            transcript_path.write_text('{"segments":[{"start":0,"end":1,"text":"dummy"}]}', encoding="utf-8")
                             self.state_manager.mark_transcribed(video_id, str(transcript_path))
                             self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"transcribed": True}))
                         elif step == JobStep.GENERATE_CLIPS:
@@ -95,6 +95,13 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
                             exported_path.write_bytes(b"")
                             self.state_manager.mark_clips_exported(video_id, [str(exported_path)])
                             self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"clips_exported": True, "exported_count": 1}))
+                        elif step == JobStep.EXPORT_SHORTS:
+                            output_dir = Path("output") / "shorts" / video_id
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                            exported_path = output_dir / "short.mp4"
+                            exported_path.write_bytes(b"")
+                            self.state_manager.mark_shorts_exported(video_id, str(exported_path))
+                            self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"shorts_exported": True}))
 
                         status.progress_current += 1
 
@@ -167,9 +174,18 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
             )
             await _wait_until(pilot, lambda: bool((app.state_manager.get_video_state(video_id) or {}).get("clips_generated")))
 
-            await pilot.press("e")
+            await pilot.press("p")
             await _wait_until(pilot, lambda: len(app.state_manager.list_jobs()) == 3)
             await _wait_until(pilot, lambda: jobs_table.row_count == 3)
+            await _wait_until(
+                pilot,
+                lambda: list(app.state_manager.list_jobs().values())[-1].get("status", {}).get("state") == "succeeded",
+            )
+            await _wait_until(pilot, lambda: bool((app.state_manager.get_video_state(video_id) or {}).get("shorts_exported")))
+
+            await pilot.press("e")
+            await _wait_until(pilot, lambda: len(app.state_manager.list_jobs()) == 4)
+            await _wait_until(pilot, lambda: jobs_table.row_count == 4)
             await _wait_until(
                 pilot,
                 lambda: list(app.state_manager.list_jobs().values())[-1].get("status", {}).get("state") == "succeeded",
@@ -179,11 +195,11 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
             # Refresh workflow should keep state consistent.
             await pilot.press("r")
             await _wait_until(pilot, lambda: app.screen.query_one("#library", DataTable).row_count == 1)
-            await _wait_until(pilot, lambda: app.screen.query_one("#jobs", DataTable).row_count == 3)
+            await _wait_until(pilot, lambda: app.screen.query_one("#jobs", DataTable).row_count == 4)
 
             # Basic health assertion: no job should have failed or recorded an error.
             jobs = app.state_manager.list_jobs().values()
-            assert len(list(jobs)) == 3
+            assert len(list(jobs)) == 4
             for job in app.state_manager.list_jobs().values():
                 st = (job or {}).get("status") or {}
                 assert st.get("state") == "succeeded"

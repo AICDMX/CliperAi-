@@ -167,6 +167,158 @@ class VideoExporter:
 
         return exported_clips
 
+    def export_full_video(
+        self,
+        *,
+        video_path: str,
+        video_name: Optional[str] = None,
+        output_filename: str = "short.mp4",
+        srt_path: Optional[str] = None,
+        subtitle_style: str = "default",
+        add_logo: bool = False,
+        logo_path: Optional[str] = "assets/logo.png",
+        logo_position: str = "top-right",
+        logo_scale: float = 0.1,
+    ) -> str:
+        """
+        Exporto un video completo aplicando (opcionalmente) subtítulos y logo.
+
+        Este flujo se usa para "shorts-only": no recorta ni genera clips.
+        """
+        video_path_p = Path(video_path)
+        if not video_path_p.exists():
+            raise FileNotFoundError(f"Video no encontrado: {video_path_p}")
+
+        if video_name is None:
+            video_name = video_path_p.stem
+
+        video_output_dir = self.output_dir / video_name
+        video_output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = video_output_dir / output_filename
+
+        srt_file = Path(srt_path) if srt_path else None
+        has_subtitles = bool(srt_file and srt_file.exists())
+        has_logo = bool(add_logo and logo_path and Path(logo_path).exists())
+
+        # Use a two-step process when both logo and subtitles are enabled to avoid subtitle duplication bugs.
+        needs_two_steps = has_logo and has_subtitles
+        temp_path_step1 = video_output_dir / f"{output_path.stem}_step1_temp.mp4"
+
+        try:
+            if needs_two_steps:
+                logger.info("Applying logo first, then subtitles in a second step (shorts export).")
+
+                logo_filter = self._get_logo_overlay_filter(position=logo_position, scale=logo_scale)
+                cmd1 = [
+                    "ffmpeg",
+                    "-i",
+                    str(video_path_p),
+                    "-i",
+                    str(logo_path),
+                    "-filter_complex",
+                    logo_filter,
+                    "-map",
+                    "[v_out]",
+                    "-map",
+                    "0:a?",
+                    "-sn",
+                    "-c:v",
+                    "libx264",
+                    "-c:a",
+                    "aac",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-y",
+                    str(temp_path_step1),
+                ]
+                result1 = subprocess.run(cmd1, capture_output=True, text=True, check=False)
+                if result1.returncode != 0:
+                    raise RuntimeError(f"Error exporting short (step 1): {result1.stderr}")
+
+                subtitle_filter = self._get_subtitle_filter(str(srt_file), subtitle_style)
+                cmd2 = [
+                    "ffmpeg",
+                    "-i",
+                    str(temp_path_step1),
+                    "-vf",
+                    subtitle_filter,
+                    "-c:a",
+                    "copy",
+                    "-y",
+                    str(output_path),
+                ]
+                result2 = subprocess.run(cmd2, capture_output=True, text=True, check=False)
+                if result2.returncode != 0:
+                    raise RuntimeError(f"Error exporting short (step 2): {result2.stderr}")
+
+                return str(output_path)
+
+            # Single-step path (logo only, subtitles only, or neither).
+            if has_logo:
+                logo_filter = self._get_logo_overlay_filter(position=logo_position, scale=logo_scale)
+                cmd = [
+                    "ffmpeg",
+                    "-i",
+                    str(video_path_p),
+                    "-i",
+                    str(logo_path),
+                    "-filter_complex",
+                    logo_filter,
+                    "-map",
+                    "[v_out]",
+                ]
+            elif has_subtitles:
+                subtitle_filter = self._get_subtitle_filter(str(srt_file), subtitle_style)
+                cmd = [
+                    "ffmpeg",
+                    "-i",
+                    str(video_path_p),
+                    "-vf",
+                    subtitle_filter,
+                    "-map",
+                    "0:v",
+                ]
+            else:
+                cmd = ["ffmpeg", "-i", str(video_path_p), "-map", "0:v"]
+
+            cmd.extend(
+                [
+                    "-map",
+                    "0:a?",
+                    "-sn",
+                    "-c:v",
+                    "libx264",
+                    "-c:a",
+                    "aac",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-y",
+                    str(output_path),
+                ]
+            )
+
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                raise RuntimeError(f"Error exporting short: {result.stderr}")
+
+            return str(output_path)
+
+        finally:
+            if temp_path_step1.exists():
+                temp_path_step1.unlink()
+
+    def _escape_ffmpeg_filter_path(self, path: str) -> str:
+        """
+        Escapa una ruta para usarse dentro de un string de filtro de ffmpeg.
+
+        Nota: esto está pensado para filtros como `subtitles=...` y `movie=...`.
+        """
+        # Order matters: escape backslashes first.
+        return path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
     def _export_single_clip(
         self,
@@ -264,9 +416,8 @@ class VideoExporter:
             
             # If we are NOT doing two steps, add subtitles here
             if not needs_two_steps and add_subtitles and subtitle_file and subtitle_file.exists():
-                 subtitle_path_escaped = str(subtitle_file).replace('\\', '\\\\').replace(':', '\\:')
-                 subtitle_filter = self._get_subtitle_filter(subtitle_path_escaped, subtitle_style)
-                 simple_filters.append(subtitle_filter)
+                subtitle_filter = self._get_subtitle_filter(str(subtitle_file), subtitle_style)
+                simple_filters.append(subtitle_filter)
 
             cmd = ["ffmpeg"] + inputs
             
@@ -306,8 +457,7 @@ class VideoExporter:
             # --- STEP 2: Add subtitles if required in a separate, safe step ---
             if needs_two_steps:
                 logger.info("Applying subtitles in a second step to avoid duplication bug.")
-                subtitle_path_escaped = str(subtitle_file).replace('\\', '\\\\').replace(':', '\\:')
-                subtitle_filter = self._get_subtitle_filter(subtitle_path_escaped, subtitle_style)
+                subtitle_filter = self._get_subtitle_filter(str(subtitle_file), subtitle_style)
                 cmd2 = ["ffmpeg", "-i", str(first_step_output), "-vf", subtitle_filter, "-c:a", "copy", "-y", str(output_path)]
                 
                 result2 = subprocess.run(cmd2, capture_output=True, text=True, check=False)
@@ -349,9 +499,9 @@ class VideoExporter:
         pos = positions.get(position, positions["top-right"])
 
         # El filtro escala el logo y luego lo superpone.
-        # [1:v] es el input del logo, se escala a (ancho_video * escala) y alto automático (-1).
-        # Luego, [0:v] (video principal) y [logo_scaled] se usan en el overlay.
-        return f"scale2ref=w=oh*mdar:h=ih*{scale}[logo_scaled][video];[video][logo_scaled]overlay={pos}"
+        # [1:v] es el input del logo, [0:v] es el video principal.
+        # scale2ref usa el video como referencia para dimensionar el logo.
+        return f"[1:v][0:v]scale2ref=w=oh*mdar:h=ih*{scale}[logo_scaled][video];[video][logo_scaled]overlay={pos}[v_out]"
 
     def _get_aspect_ratio_filter(self, aspect_ratio: str) -> Optional[str]:
         """
@@ -391,12 +541,14 @@ class VideoExporter:
         Genero el filtro de ffmpeg para quemar subtítulos en el video
 
         Args:
-            subtitle_path: Ruta al archivo SRT (escapada para ffmpeg)
+            subtitle_path: Ruta al archivo SRT
             style: Estilo de subtítulos ("default", "bold", "yellow", "tiktok")
 
         Returns:
             String de filtro para ffmpeg
         """
+        subtitle_path_escaped = self._escape_ffmpeg_filter_path(subtitle_path)
+
         # Estilos predefinidos para subtítulos
         # TODOS con texto AMARILLO para máxima visibilidad
         styles = {
@@ -466,7 +618,7 @@ class VideoExporter:
         # Construyo el filtro subtitles con el estilo
         # subtitles filter quema los subtítulos directamente en el video
         # Wrapeamos el path con comillas simples para manejar espacios
-        subtitle_filter = f"subtitles='{subtitle_path}':force_style='"
+        subtitle_filter = f"subtitles='{subtitle_path_escaped}':force_style='"
         subtitle_filter += f"FontName={selected_style['FontName']},"
         subtitle_filter += f"FontSize={selected_style['FontSize']},"
         subtitle_filter += f"PrimaryColour={selected_style['PrimaryColour']},"

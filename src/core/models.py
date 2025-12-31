@@ -12,6 +12,7 @@ class JobStep(str, Enum):
     TRANSCRIBE = "transcribe"
     GENERATE_CLIPS = "generate_clips"
     EXPORT_CLIPS = "export_clips"
+    EXPORT_SHORTS = "export_shorts"
 
 
 class JobState(str, Enum):
@@ -101,4 +102,3 @@ class JobStatus:
             finished_at=data.get("finished_at"),
             error=data.get("error"),
         )
-
