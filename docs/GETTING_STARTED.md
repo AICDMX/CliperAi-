@@ -42,14 +42,14 @@ python setup.py --output=/etc/cliper/.env
 
 Choose your interface:
 
-**Command Line:**
+**Textual TUI (Recommended):**
 ```bash
-uv run cliper.py
+uv run -m src.tui.app
 ```
 
-**GUI (Recommended for beginners):**
+**Legacy CLI (prompt-loop):**
 ```bash
-python cliper_gui.py
+uv run cliper.py
 ```
 
 ---
@@ -62,12 +62,11 @@ python cliper_gui.py
 3. Clips appear in the `output/` directory
 4. Publish directly to social platforms
 
-### GUI Workflow
-1. **Download Tab** - Paste YouTube URL and download
-2. **Transcribe Tab** - Convert audio to text
-3. **Clips Tab** - Detect clip boundaries
-4. **AI Captions Tab** - Generate engaging captions
-5. **Export Tab** - Configure and export clips
+### TUI Workflow
+1. Press `a` to add videos (YouTube URL or local paths)
+2. Select videos with `space`
+3. Queue jobs with `t` (transcribe), `c` (clips), `e` (export)
+4. Watch job progress + logs in the right panel
 
 ---
 

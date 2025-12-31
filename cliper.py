@@ -8,7 +8,6 @@ Orquesta todo el pipeline: download → transcribe → generate clips → resize
 """
 
 import sys
-import hashlib
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dotenv import load_dotenv
@@ -33,6 +32,13 @@ try:
     from src.copys_generator import generate_copys_for_video
     from src.cleanup_manager import CleanupManager
     from src.utils import get_state_manager
+    from src.utils.video_registry import (
+        SUPPORTED_VIDEO_EXTENSIONS,
+        collect_local_video_paths as _shared_collect_local_video_paths,
+        compute_unique_video_id as _compute_unique_video_id,
+        is_supported_video_file as _is_supported_video_file,
+        load_registered_videos,
+    )
     from config.content_presets import get_preset, list_presets, get_preset_description
 except ImportError as e:
     print(f"Error importando módulos: {e}")
@@ -41,37 +47,6 @@ except ImportError as e:
 
 # Console de Rich
 console = Console()
-
-SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".webm"}
-
-
-def _is_supported_video_file(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
-
-
-def _short_hash(text: str, length: int = 8) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:length]
-
-
-def _compute_unique_video_id(video_path: Path, state_manager) -> str:
-    """
-    Mantiene compatibilidad con IDs viejos (stem) y evita colisiones cuando se
-    agregan archivos con el mismo nombre desde rutas distintas.
-    """
-    base = video_path.stem
-    existing = state_manager.get_video_state(base)
-    if not existing:
-        return base
-
-    existing_path = (existing.get("video_path") or "").strip()
-    if existing_path:
-        try:
-            if Path(existing_path).resolve() == video_path.resolve():
-                return base
-        except Exception:
-            pass
-
-    return f"{base}_{_short_hash(str(video_path.resolve()))}"
 
 
 def _parse_video_selection(selection: str, max_index: int) -> List[int]:
@@ -119,12 +94,13 @@ def _collect_local_video_paths(input_str: str) -> Tuple[List[Path], List[str]]:
     if not raw:
         return [], ["No input provided"]
 
-    candidates: List[str] = [p.strip().strip('"').strip("'") for p in raw.split(",") if p.strip()]
-    paths: List[Path] = []
+    candidates: List[str] = [p.strip() for p in raw.split(",") if p.strip()]
+    all_paths: List[Path] = []
     errors: List[str] = []
 
     for candidate in candidates:
-        p = Path(candidate).expanduser()
+        normalized = candidate.strip().strip('"').strip("'")
+        p = Path(normalized).expanduser()
         if not p.exists():
             errors.append(f"Path not found: {candidate}")
             continue
@@ -134,28 +110,16 @@ def _collect_local_video_paths(input_str: str) -> Tuple[List[Path], List[str]]:
                 f"[cyan]Include subfolders for '{p}'?[/cyan]",
                 default=False
             )
-            iterator = p.rglob("*") if include_subfolders else p.glob("*")
-            found_any = False
-            for item in iterator:
-                if _is_supported_video_file(item):
-                    paths.append(item)
-                    found_any = True
-            if not found_any:
-                errors.append(f"No supported videos found in folder: {p}")
-            continue
-
-        paths.append(p)
-
-    filtered: List[Path] = []
-    for p in paths:
-        if _is_supported_video_file(p):
-            filtered.append(p)
+            paths, errs = _shared_collect_local_video_paths(str(p), recursive=include_subfolders)
         else:
-            errors.append(f"Unsupported video file: {p}")
+            paths, errs = _shared_collect_local_video_paths(str(p))
+
+        all_paths.extend(paths)
+        errors.extend(errs)
 
     unique: List[Path] = []
     seen: set[str] = set()
-    for p in filtered:
+    for p in all_paths:
         try:
             key = str(p.resolve())
         except Exception:
@@ -174,44 +138,7 @@ def cargar_videos_disponibles(state_manager) -> List[Dict[str, str]]:
     - Incluye videos registrados con ruta fuera del proyecto.
     - Solo retorna videos cuyo archivo existe actualmente.
     """
-    downloads_dir = Path("downloads")
-    downloads_dir.mkdir(parents=True, exist_ok=True)
-
-    # Descubrir videos en downloads/
-    video_files: set[Path] = set()
-    for ext in SUPPORTED_VIDEO_EXTENSIONS:
-        video_files |= set(downloads_dir.glob(f"*{ext}"))
-        video_files |= set(downloads_dir.glob(f"*{ext.upper()}"))
-
-    for video_file in video_files:
-        video_id = _compute_unique_video_id(video_file, state_manager)
-        state_manager.register_video(
-            video_id=video_id,
-            filename=video_file.name,
-            video_path=str(video_file),
-        )
-
-    # Construir lista desde el state (incluye paths externos)
-    videos: List[Dict[str, str]] = []
-    for video_id, state in state_manager.get_all_videos().items():
-        filename = state.get("filename") or f"{video_id}.mp4"
-        video_path = state.get("video_path")
-        if not video_path:
-            fallback = Path("downloads") / filename
-            if fallback.exists():
-                video_path = str(fallback)
-                state_manager.register_video(video_id=video_id, filename=filename, video_path=video_path)
-            else:
-                continue
-
-        vp = Path(video_path)
-        if not vp.exists() or not vp.is_file():
-            continue
-
-        videos.append({"filename": filename, "path": str(vp), "video_id": video_id})
-
-    videos.sort(key=lambda v: v["filename"].lower())
-    return videos
+    return load_registered_videos(state_manager)
 
 
 def mostrar_banner():
