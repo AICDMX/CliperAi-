@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
+import uuid
 
 
 class StateManager:
@@ -43,6 +44,9 @@ class StateManager:
         # Cargo el estado actual (o creo uno vacío)
         self.state = self._load_state()
 
+        # Estado de jobs/queue (separado para no romper compatibilidad con project_state.json)
+        self.jobs_file = self.state_file.parent / "jobs_state.json"
+        self.jobs_state = self._load_jobs_state()
 
     def _load_state(self) -> Dict:
         """
@@ -59,6 +63,32 @@ class StateManager:
         else:
             # Primera vez, archivo no existe
             return {}
+
+    def _load_jobs_state(self) -> Dict:
+        """
+        Cargo estado de jobs desde temp/jobs_state.json.
+
+        Estructura:
+        {
+          "jobs": { "<job_id>": { "spec": {...}, "status": {...} } },
+          "queue": ["<job_id>", ...]
+        }
+        """
+        if self.jobs_file.exists():
+            try:
+                with open(self.jobs_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        data.setdefault("jobs", {})
+                        data.setdefault("queue", [])
+                        return data
+            except json.JSONDecodeError:
+                return {"jobs": {}, "queue": []}
+        return {"jobs": {}, "queue": []}
+
+    def _save_jobs_state(self) -> None:
+        with open(self.jobs_file, "w", encoding="utf-8") as f:
+            json.dump(self.jobs_state, f, indent=2, ensure_ascii=False)
 
 
     def _save_state(self):
@@ -253,6 +283,78 @@ class StateManager:
         if video_id in self.state:
             del self.state[video_id]
             self._save_state()
+
+    # ---------------------------
+    # Jobs / Queue (additive API)
+    # ---------------------------
+
+    def create_job_id(self) -> str:
+        return uuid.uuid4().hex[:12]
+
+    def enqueue_job(self, job_spec: Dict, initial_status: Optional[Dict] = None) -> str:
+        """
+        Encola un job para ejecución.
+
+        Args:
+            job_spec: Dict serializable (p.ej. JobSpec.to_dict())
+            initial_status: Dict serializable (p.ej. JobStatus.to_dict())
+        """
+        job_id = str(job_spec.get("job_id") or self.create_job_id())
+        job_spec = dict(job_spec)
+        job_spec["job_id"] = job_id
+
+        if initial_status is None:
+            initial_status = {"state": "pending"}
+
+        self.jobs_state.setdefault("jobs", {})[job_id] = {
+            "spec": job_spec,
+            "status": dict(initial_status),
+        }
+        queue = self.jobs_state.setdefault("queue", [])
+        if job_id not in queue:
+            queue.append(job_id)
+        self._save_jobs_state()
+        return job_id
+
+    def list_jobs(self) -> Dict[str, Dict]:
+        return dict(self.jobs_state.get("jobs") or {})
+
+    def get_job(self, job_id: str) -> Optional[Dict]:
+        return (self.jobs_state.get("jobs") or {}).get(job_id)
+
+    def get_job_spec(self, job_id: str) -> Optional[Dict]:
+        job = self.get_job(job_id)
+        return job.get("spec") if job else None
+
+    def get_job_status(self, job_id: str) -> Optional[Dict]:
+        job = self.get_job(job_id)
+        return job.get("status") if job else None
+
+    def update_job_status(self, job_id: str, updates: Dict) -> None:
+        job = self.get_job(job_id)
+        if not job:
+            return
+        status = job.setdefault("status", {})
+        status.update(dict(updates))
+        job["status"] = status
+        self.jobs_state["jobs"][job_id] = job
+        self._save_jobs_state()
+
+    def dequeue_next_job_id(self) -> Optional[str]:
+        queue = self.jobs_state.get("queue") or []
+        if not queue:
+            return None
+        job_id = queue.pop(0)
+        self.jobs_state["queue"] = queue
+        self._save_jobs_state()
+        return job_id
+
+    def remove_job(self, job_id: str) -> None:
+        jobs = self.jobs_state.get("jobs") or {}
+        jobs.pop(job_id, None)
+        self.jobs_state["jobs"] = jobs
+        self.jobs_state["queue"] = [j for j in (self.jobs_state.get("queue") or []) if j != job_id]
+        self._save_jobs_state()
 
 
 # Función helper para obtener el state manager global

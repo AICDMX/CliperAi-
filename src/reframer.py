@@ -103,9 +103,23 @@ IMPLICACIÓN:
 Ver: pasoxpaso/todoPASO3/spike-results.md para datos completos
 """
 
-import cv2
-import numpy as np
-import mediapipe as mp
+from __future__ import annotations
+
+_OPTIONAL_DEPENDENCY_ERROR = None
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+    import mediapipe as mp  # type: ignore
+except ModuleNotFoundError as e:
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
+    mp = None  # type: ignore
+    _OPTIONAL_DEPENDENCY_ERROR = str(e)
+except Exception as e:
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
+    mp = None  # type: ignore
+    _OPTIONAL_DEPENDENCY_ERROR = str(e)
 import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Tuple
@@ -272,6 +286,11 @@ class FaceReframer:
         safe_zone_margin: float = 0.15,
         min_detection_confidence: float = 0.5
     ):
+        if cv2 is None or mp is None or np is None:
+            raise ModuleNotFoundError(
+                "FaceReframer requires optional dependencies (opencv-python, mediapipe, numpy). "
+                f"Import error: {_OPTIONAL_DEPENDENCY_ERROR}"
+            )
         """
         PARÁMETROS CONFIGURABLES (defaults basados en spike validation):
 
