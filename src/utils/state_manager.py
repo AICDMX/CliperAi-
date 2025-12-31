@@ -130,6 +130,11 @@ class StateManager:
                 'clips_generated': False,
                 'clips': [],
                 'clips_metadata_path': None,
+                # Shorts-only processing (additive; does not couple to clips_* flags)
+                'shorts_exported': False,
+                'shorts_export_path': None,
+                'shorts_srt_path': None,
+                'shorts_input_path': None,
                 'content_type': content_type,  # Nuevo: tipo de contenido
                 'preset': preset if preset else {},  # Nuevo: configuración
                 'last_updated': now
@@ -229,6 +234,25 @@ class StateManager:
             self.state[video_id]['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self._save_state()
 
+    def mark_shorts_exported(
+        self,
+        video_id: str,
+        exported_path: str,
+        *,
+        srt_path: Optional[str] = None,
+        input_path: Optional[str] = None,
+    ) -> None:
+        """
+        Marco que ya exporté el short (video completo) con subtítulos/logo.
+        """
+        if video_id in self.state:
+            self.state[video_id]['shorts_exported'] = True
+            self.state[video_id]['shorts_export_path'] = exported_path
+            self.state[video_id]['shorts_srt_path'] = srt_path
+            self.state[video_id]['shorts_input_path'] = input_path
+            self.state[video_id]['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self._save_state()
+
 
     def get_video_state(self, video_id: str) -> Optional[Dict]:
         """
@@ -252,6 +276,12 @@ class StateManager:
         video_state = self.get_video_state(video_id)
         if video_state:
             return video_state.get('transcribed', False)
+        return False
+
+    def is_shorts_exported(self, video_id: str) -> bool:
+        video_state = self.get_video_state(video_id)
+        if video_state:
+            return bool(video_state.get('shorts_exported', False))
         return False
 
 
