@@ -1,0 +1,198 @@
+import asyncio
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+def _create_fixture_video_mp4(path: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("ffmpeg not available; skipping TUI video integration test")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:d=1",
+        "-c:v",
+        "mpeg4",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        pytest.skip(f"ffmpeg could not generate mp4 fixture (missing encoder?): {e.stderr or e}")
+
+
+async def _wait_until(pilot, predicate, *, timeout: float = 5.0, step: float = 0.05) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        if predicate():
+            return
+        if loop.time() >= deadline:
+            raise AssertionError("Timed out waiting for UI state")
+        await pilot.pause(step)
+
+
+def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
+    async def run() -> None:
+        # Isolate all state in a temporary project directory.
+        monkeypatch.chdir(tmp_path)
+
+        import src.utils.state_manager as state_manager_module
+
+        state_manager_module._state_manager_instance = None
+
+        from src.core.events import LogEvent, LogLevel, StateEvent
+        from src.core.models import JobStatus, JobStep
+        import src.tui.app as tui_app_module
+
+        fixture_path = tmp_path / "dec 9th promo video.mp4"
+        _create_fixture_video_mp4(fixture_path)
+        video_id = fixture_path.stem
+
+        class FakeJobRunner:
+            def __init__(self, state_manager, emit):
+                self.state_manager = state_manager
+                self.emit = emit
+
+            def run_job(self, spec):
+                status = JobStatus(progress_current=0, progress_total=max(1, len(spec.video_ids) * len(spec.steps)))
+                status.mark_started()
+
+                for video_id in spec.video_ids:
+                    for step in spec.steps:
+                        if step == JobStep.TRANSCRIBE:
+                            transcript_path = Path("temp") / "transcripts" / f"{video_id}.txt"
+                            transcript_path.parent.mkdir(parents=True, exist_ok=True)
+                            transcript_path.write_text("dummy transcript", encoding="utf-8")
+                            self.state_manager.mark_transcribed(video_id, str(transcript_path))
+                            self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"transcribed": True}))
+                        elif step == JobStep.GENERATE_CLIPS:
+                            clips = [{"start": 0, "end": 1, "title": "clip-1"}]
+                            clips_metadata_path = Path("temp") / "clips" / f"{video_id}.json"
+                            clips_metadata_path.parent.mkdir(parents=True, exist_ok=True)
+                            clips_metadata_path.write_text("[]", encoding="utf-8")
+                            self.state_manager.mark_clips_generated(video_id, clips, clips_metadata_path=str(clips_metadata_path))
+                            self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"clips_generated": True, "clips_count": 1}))
+                        elif step == JobStep.EXPORT_CLIPS:
+                            output_dir = Path("output")
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                            exported_path = output_dir / f"{video_id}_clip1.mp4"
+                            exported_path.write_bytes(b"")
+                            self.state_manager.mark_clips_exported(video_id, [str(exported_path)])
+                            self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"clips_exported": True, "exported_count": 1}))
+
+                        status.progress_current += 1
+
+                status.mark_finished_ok()
+                self.emit(LogEvent(job_id=spec.job_id, level=LogLevel.INFO, message="Fake job completed"))
+                return status
+
+        monkeypatch.setattr(tui_app_module, "JobRunner", FakeJobRunner)
+
+        app = tui_app_module.CliperTUI()
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            # Repro reported crash path: `a` to add videos should not throw.
+            await pilot.press("a")
+
+            from textual.widgets import Button, DataTable, Input, RichLog
+
+            def has_paths_input() -> bool:
+                try:
+                    app.screen.query_one("#paths", Input)
+                    return True
+                except Exception:
+                    return False
+
+            await _wait_until(pilot, has_paths_input)
+
+            paths_input = app.screen.query_one("#paths", Input)
+            if hasattr(pilot, "type"):
+                await pilot.type(str(fixture_path))
+            else:
+                paths_input.value = str(fixture_path)
+
+            app.screen.query_one("#add", Button).press()
+            await _wait_until(pilot, lambda: not has_paths_input())
+
+            library = app.screen.query_one("#library", DataTable)
+            await _wait_until(pilot, lambda: library.row_count == 1)
+
+            jobs_table = app.screen.query_one("#jobs", DataTable)
+            await _wait_until(pilot, lambda: jobs_table.row_count == 0)
+            assert video_id in (app.state_manager.get_all_videos() or {})
+
+            logs = app.screen.query_one("#logs", RichLog)
+            if hasattr(logs, "export_text"):
+                exported = logs.export_text()
+                assert "NoActiveWorker" not in exported
+                assert "Traceback" not in exported
+
+            # Selection workflow
+            await pilot.press("space")
+            await _wait_until(pilot, lambda: len(app.selected_video_ids) == 1)
+            assert video_id in app.selected_video_ids
+
+            # Enqueue & complete each supported job workflow.
+            await pilot.press("t")
+            await _wait_until(pilot, lambda: len(app.state_manager.list_jobs()) == 1)
+            await _wait_until(pilot, lambda: jobs_table.row_count == 1)
+            await _wait_until(
+                pilot,
+                lambda: list(app.state_manager.list_jobs().values())[-1].get("status", {}).get("state") == "succeeded",
+            )
+            await _wait_until(pilot, lambda: bool((app.state_manager.get_video_state(video_id) or {}).get("transcribed")))
+
+            await pilot.press("c")
+            await _wait_until(pilot, lambda: len(app.state_manager.list_jobs()) == 2)
+            await _wait_until(pilot, lambda: jobs_table.row_count == 2)
+            await _wait_until(
+                pilot,
+                lambda: list(app.state_manager.list_jobs().values())[-1].get("status", {}).get("state") == "succeeded",
+            )
+            await _wait_until(pilot, lambda: bool((app.state_manager.get_video_state(video_id) or {}).get("clips_generated")))
+
+            await pilot.press("e")
+            await _wait_until(pilot, lambda: len(app.state_manager.list_jobs()) == 3)
+            await _wait_until(pilot, lambda: jobs_table.row_count == 3)
+            await _wait_until(
+                pilot,
+                lambda: list(app.state_manager.list_jobs().values())[-1].get("status", {}).get("state") == "succeeded",
+            )
+            await _wait_until(pilot, lambda: bool((app.state_manager.get_video_state(video_id) or {}).get("clips_exported")))
+
+            # Refresh workflow should keep state consistent.
+            await pilot.press("r")
+            await _wait_until(pilot, lambda: app.screen.query_one("#library", DataTable).row_count == 1)
+            await _wait_until(pilot, lambda: app.screen.query_one("#jobs", DataTable).row_count == 3)
+
+            # Basic health assertion: no job should have failed or recorded an error.
+            jobs = app.state_manager.list_jobs().values()
+            assert len(list(jobs)) == 3
+            for job in app.state_manager.list_jobs().values():
+                st = (job or {}).get("status") or {}
+                assert st.get("state") == "succeeded"
+                assert not st.get("error")
+
+            # Basic artifact assertion: fake export wrote at least one file.
+            assert any(Path("output").glob("*.mp4"))
+
+            # Quit workflow
+            await pilot.press("q")
+
+    asyncio.run(run())

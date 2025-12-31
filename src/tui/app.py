@@ -24,6 +24,10 @@ class AddVideosModal(ModalScreen[Optional[Dict[str, object]]]):
         Binding("escape", "dismiss", "Cancel"),
     ]
 
+    def on_mount(self) -> None:
+        # Default focus so tests and users can type immediately.
+        self.query_one("#paths", Input).focus()
+
     def compose(self) -> ComposeResult:
         yield Static("Add Videos", id="title")
         yield Static("YouTube URL:", classes="label")
@@ -165,10 +169,17 @@ class CliperTUI(App):
         table = self.query_one("#library", DataTable)
         if table.cursor_row is None:
             return
-        row_key = table.get_row_key(table.cursor_row)
+        row_key = None
+        if hasattr(table, "get_row_key"):
+            row_key = table.get_row_key(table.cursor_row)  # type: ignore[attr-defined]
+        else:
+            try:
+                row_key = list(getattr(table, "rows", {}).keys())[int(table.cursor_row)]
+            except Exception:
+                row_key = None
         if row_key is None:
             return
-        video_id = str(row_key)
+        video_id = getattr(row_key, "value", None) or str(row_key)
         if video_id in self.selected_video_ids:
             self.selected_video_ids.remove(video_id)
         else:
@@ -176,7 +187,11 @@ class CliperTUI(App):
         self.refresh_library()
 
     async def action_add_videos(self) -> None:
-        result = await self.push_screen_wait(AddVideosModal())
+        # Use a non-blocking modal flow to avoid Textual worker requirements that can
+        # raise `NoActiveWorker` under `push_screen_wait(...)` in some environments.
+        await self.push_screen(AddVideosModal(), callback=self._on_add_videos_dismissed)
+
+    def _on_add_videos_dismissed(self, result: Optional[Dict[str, object]]) -> None:
         if not result:
             return
 
@@ -206,17 +221,28 @@ class CliperTUI(App):
             self.run_worker(download_and_register, thread=True)
 
         if paths_raw:
-            paths, errors = collect_local_video_paths(paths_raw, recursive=recursive)
-            for err in errors:
-                logs.write(f"[yellow]{err}[/yellow]")
+            def collect_and_register_local() -> None:
+                try:
+                    paths, errors = collect_local_video_paths(paths_raw, recursive=recursive)
+                    registered_count = 0
+                    if paths:
+                        registered = register_local_videos(self.state_manager, paths)
+                        registered_count = len(registered)
+                    self.call_from_thread(self._on_local_videos_registered, errors, registered_count)
+                except Exception as e:
+                    self.call_from_thread(logs.write, f"[red]Failed to register local videos:[/red] {e}")
 
-            if not paths:
-                logs.write("[yellow]No supported videos found to register.[/yellow]")
-                return
+            self.run_worker(collect_and_register_local, thread=True)
 
-            registered = register_local_videos(self.state_manager, paths)
-            logs.write(f"[green]Registered {len(registered)} video(s).[/green]")
-            self.refresh_all()
+    def _on_local_videos_registered(self, errors: List[str], registered_count: int) -> None:
+        logs = self.query_one("#logs", RichLog)
+        for err in errors:
+            logs.write(f"[yellow]{err}[/yellow]")
+        if registered_count <= 0:
+            logs.write("[yellow]No supported videos found to register.[/yellow]")
+            return
+        logs.write(f"[green]Registered {registered_count} video(s).[/green]")
+        self.refresh_all()
 
     def _selected_or_current_video_ids(self) -> List[str]:
         if self.selected_video_ids:
@@ -316,9 +342,12 @@ class CliperTUI(App):
         if event.data_table.id != "library":
             return
 
-        self.selected_video_id = str(event.row_key)
+        self.selected_video_id = getattr(event.row_key, "value", None) or str(event.row_key)
         state = self.state_manager.get_video_state(self.selected_video_id) or {}
-        details = self.query_one("#details", Static)
+        try:
+            details = self.query_one("#details", Static)
+        except Exception:
+            return
 
         filename = state.get("filename") or self.selected_video_id
         video_path = state.get("video_path") or ""
