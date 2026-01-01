@@ -11,6 +11,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, DataTable, Footer, Header, Input, RichLog, Static
 
 from src.utils import get_state_manager
+from src.utils.open_path import open_path
 from src.utils.video_registry import load_registered_videos
 from src.utils.video_registry import collect_local_video_paths, register_local_videos
 
@@ -116,6 +117,7 @@ class CliperTUI(App):
     #library { width: 2fr; }
     #right { width: 1fr; }
     #details { height: auto; padding: 1 2; border: solid gray; }
+    #open-actions { height: auto; padding: 1 2; }
     #jobs { height: 12; border: solid gray; }
     #logs { height: 1fr; border: solid gray; }
     .label { margin: 1 2 0 2; }
@@ -142,8 +144,44 @@ class CliperTUI(App):
         self.videos: List[Dict[str, str]] = []
         self.selected_video_id: Optional[str] = None
         self.selected_video_ids: Set[str] = set()
+        self.selected_job_id: Optional[str] = None
 
         self._running_job_id: Optional[str] = None
+        self._selected_run_output_dir: Optional[Path] = None
+        self._selected_final_video_path: Optional[Path] = None
+
+    def _load_selected_job_open_targets(self, job_id: Optional[str]) -> None:
+        run_output_dir: Optional[Path] = None
+        final_video_path: Optional[Path] = None
+        succeeded = False
+
+        if job_id:
+            job = self.state_manager.get_job(job_id) or {}
+            status = (job.get("status") or {}) if isinstance(job, dict) else {}
+            succeeded = status.get("state") == "succeeded"
+            run_output_dir_raw = status.get("run_output_dir")
+            final_video_path_raw = status.get("final_video_path")
+            run_output_dir = Path(run_output_dir_raw) if run_output_dir_raw else None
+            final_video_path = Path(final_video_path_raw) if final_video_path_raw else None
+
+            if succeeded and run_output_dir and run_output_dir.exists() and (not final_video_path or not final_video_path.exists()):
+                try:
+                    mp4s = list(run_output_dir.rglob("*.mp4"))
+                    if mp4s:
+                        final_video_path = max(mp4s, key=lambda p: p.stat().st_mtime)
+                except Exception:
+                    final_video_path = None
+
+        self._selected_run_output_dir = run_output_dir
+        self._selected_final_video_path = final_video_path
+
+        try:
+            open_video_btn = self.query_one("#open_video", Button)
+            open_output_btn = self.query_one("#open_output", Button)
+            open_video_btn.disabled = not (succeeded and self._selected_final_video_path and self._selected_final_video_path.exists())
+            open_output_btn.disabled = not (succeeded and self._selected_run_output_dir and self._selected_run_output_dir.exists())
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -151,6 +189,9 @@ class CliperTUI(App):
             yield DataTable(id="library")
             with Vertical(id="right"):
                 yield Static("Select a video", id="details")
+                with Horizontal(id="open-actions"):
+                    yield Button("Open Video", id="open_video", disabled=True)
+                    yield Button("Open Output Folder", id="open_output", disabled=True)
                 yield DataTable(id="jobs")
                 yield RichLog(id="logs", markup=True)
         yield Footer()
@@ -172,6 +213,8 @@ class CliperTUI(App):
     def refresh_all(self) -> None:
         self.refresh_library()
         self.refresh_jobs()
+        if self.selected_job_id:
+            self._load_selected_job_open_targets(self.selected_job_id)
         self._maybe_start_next_job()
 
     def refresh_library(self) -> None:
@@ -427,6 +470,45 @@ class CliperTUI(App):
         self._running_job_id = None
         self.refresh_all()
 
+        if self.selected_job_id is None:
+            self.selected_job_id = job_id
+        self._load_selected_job_open_targets(self.selected_job_id)
+
+        logs = self.query_one("#logs", RichLog)
+        job = self.state_manager.get_job(job_id) or {}
+        status = (job.get("status") or {}) if isinstance(job, dict) else {}
+        if status.get("state") == "succeeded":
+            run_output_dir_raw = (status or {}).get("run_output_dir")
+            final_video_path_raw = (status or {}).get("final_video_path")
+            if final_video_path_raw:
+                logs.write(f"[green]Job finished.[/green] Video: {final_video_path_raw}")
+            if run_output_dir_raw:
+                logs.write(f"[green]Output folder:[/green] {run_output_dir_raw}")
+        else:
+            err = status.get("error") or "Unknown error"
+            logs.write(f"[red]Job failed:[/red] {err}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "open_video":
+            if not self._selected_final_video_path:
+                self.query_one("#logs", RichLog).write("[yellow]No final video available for the selected job.[/yellow]")
+                return
+            try:
+                open_path(self._selected_final_video_path)
+            except Exception as e:
+                self.query_one("#logs", RichLog).write(f"[red]Failed to open video:[/red] {e}")
+            return
+
+        if event.button.id == "open_output":
+            if not self._selected_run_output_dir:
+                self.query_one("#logs", RichLog).write("[yellow]No output folder available for the selected job.[/yellow]")
+                return
+            try:
+                open_path(self._selected_run_output_dir)
+            except Exception as e:
+                self.query_one("#logs", RichLog).write(f"[red]Failed to open output folder:[/red] {e}")
+            return
+
     def _handle_core_event(self, event: object) -> None:
         logs = self.query_one("#logs", RichLog)
 
@@ -457,6 +539,10 @@ class CliperTUI(App):
             return
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "jobs":
+            self.selected_job_id = getattr(event.row_key, "value", None) or str(event.row_key)
+            self._load_selected_job_open_targets(self.selected_job_id)
+            return
         if event.data_table.id != "library":
             return
 

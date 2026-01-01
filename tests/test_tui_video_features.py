@@ -1,9 +1,12 @@
 import asyncio
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("textual")
 
 
 def _create_fixture_video_mp4(path: Path) -> None:
@@ -73,28 +76,51 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
                 status = JobStatus(progress_current=0, progress_total=max(1, len(spec.video_ids) * len(spec.steps)))
                 status.mark_started()
 
+                def slugify(value: str, max_len: int = 48) -> str:
+                    cleaned = (value or "").strip().lower().replace(" ", "_")
+                    cleaned = re.sub(r"[^a-z0-9._-]+", "_", cleaned)
+                    cleaned = re.sub(r"_+", "_", cleaned).strip("._-")
+                    return (cleaned or "run")[:max_len]
+
+                run_output_dir = Path("output") / "runs" / f"{slugify(video_id)}_{spec.job_id}"
+                run_output_dir.mkdir(parents=True, exist_ok=True)
+                self.state_manager.update_job_status(spec.job_id, {"run_output_dir": str(run_output_dir)})
+
                 for video_id in spec.video_ids:
                     for step in spec.steps:
                         if step == JobStep.TRANSCRIBE:
-                            transcript_path = Path("temp") / "transcripts" / f"{video_id}.json"
+                            transcript_path = run_output_dir / video_id / "transcribe" / f"{video_id}_transcript.json"
                             transcript_path.parent.mkdir(parents=True, exist_ok=True)
                             transcript_path.write_text('{"segments":[{"start":0,"end":1,"text":"dummy"}]}', encoding="utf-8")
                             self.state_manager.mark_transcribed(video_id, str(transcript_path))
                             self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"transcribed": True}))
                         elif step == JobStep.GENERATE_CLIPS:
                             clips = [{"start": 0, "end": 1, "title": "clip-1"}]
-                            clips_metadata_path = Path("temp") / "clips" / f"{video_id}.json"
+                            clips_metadata_path = run_output_dir / video_id / "clips" / f"{video_id}.json"
                             clips_metadata_path.parent.mkdir(parents=True, exist_ok=True)
                             clips_metadata_path.write_text("[]", encoding="utf-8")
                             self.state_manager.mark_clips_generated(video_id, clips, clips_metadata_path=str(clips_metadata_path))
-                            self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"clips_generated": True, "clips_count": 1}))
+                            self.emit(
+                                StateEvent(
+                                    job_id=spec.job_id,
+                                    video_id=video_id,
+                                    updates={"clips_generated": True, "clips_count": 1},
+                                )
+                            )
                         elif step == JobStep.EXPORT_CLIPS:
-                            output_dir = Path("output")
-                            output_dir.mkdir(parents=True, exist_ok=True)
-                            exported_path = output_dir / f"{video_id}_clip1.mp4"
+                            export_dir = run_output_dir / video_id / "export"
+                            export_dir.mkdir(parents=True, exist_ok=True)
+                            exported_path = export_dir / "clip1.mp4"
                             exported_path.write_bytes(b"")
                             self.state_manager.mark_clips_exported(video_id, [str(exported_path)])
-                            self.emit(StateEvent(job_id=spec.job_id, video_id=video_id, updates={"clips_exported": True, "exported_count": 1}))
+                            self.state_manager.update_job_status(spec.job_id, {"final_video_path": str(exported_path)})
+                            self.emit(
+                                StateEvent(
+                                    job_id=spec.job_id,
+                                    video_id=video_id,
+                                    updates={"clips_exported": True, "exported_count": 1},
+                                )
+                            )
                         elif step == JobStep.EXPORT_SHORTS:
                             output_dir = Path("output") / "shorts" / video_id
                             output_dir.mkdir(parents=True, exist_ok=True)
@@ -204,9 +230,14 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
                 st = (job or {}).get("status") or {}
                 assert st.get("state") == "succeeded"
                 assert not st.get("error")
+                assert st.get("run_output_dir")
+                assert Path(st["run_output_dir"]).exists()
 
             # Basic artifact assertion: fake export wrote at least one file.
-            assert any(Path("output").glob("*.mp4"))
+            runs_dir = Path("output") / "runs"
+            assert runs_dir.exists()
+            assert len([p for p in runs_dir.iterdir() if p.is_dir()]) == 3
+            assert any(runs_dir.rglob("*.mp4"))
 
             # Quit workflow
             await pilot.press("q")

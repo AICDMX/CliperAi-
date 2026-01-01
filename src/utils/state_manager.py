@@ -122,7 +122,7 @@ class StateManager:
         if video_id not in self.state:
             self.state[video_id] = {
                 'filename': filename,
-                'video_path': video_path,
+                'video_path': self._normalize_path(video_path),
                 'downloaded': True,
                 'transcribed': False,
                 'transcription_path': None,
@@ -152,8 +152,9 @@ class StateManager:
 
         if video_path:
             existing_path = existing.get('video_path')
-            if existing_path != video_path:
-                existing['video_path'] = video_path
+            normalized = self._normalize_path(video_path)
+            if existing_path != normalized:
+                existing['video_path'] = normalized
                 updated = True
 
         if content_type and existing.get('content_type') != content_type:
@@ -178,6 +179,11 @@ class StateManager:
             return None
         return state.get('video_path')
 
+    def _normalize_path(self, path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        return str(Path(path))
+
 
     def mark_transcribed(self, video_id: str, transcription_path: str) -> None:
         """
@@ -185,8 +191,9 @@ class StateManager:
         """
         if video_id in self.state:
             self.state[video_id]['transcribed'] = True
-            self.state[video_id]['transcription_path'] = transcription_path
-            self.state[video_id]['transcript_path'] = transcription_path  # Alias
+            normalized = self._normalize_path(transcription_path)
+            self.state[video_id]['transcription_path'] = normalized
+            self.state[video_id]['transcript_path'] = normalized  # Alias
             self.state[video_id]['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self._save_state()
 
@@ -208,7 +215,7 @@ class StateManager:
         if video_id in self.state:
             self.state[video_id]['clips_generated'] = True
             self.state[video_id]['clips'] = clips
-            self.state[video_id]['clips_metadata_path'] = clips_metadata_path
+            self.state[video_id]['clips_metadata_path'] = self._normalize_path(clips_metadata_path)
             self.state[video_id]['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self._save_state()
 
@@ -229,7 +236,7 @@ class StateManager:
         """
         if video_id in self.state:
             self.state[video_id]['clips_exported'] = True
-            self.state[video_id]['exported_clips'] = exported_paths
+            self.state[video_id]['exported_clips'] = [self._normalize_path(p) for p in (exported_paths or []) if p]
             self.state[video_id]['export_aspect_ratio'] = aspect_ratio
             self.state[video_id]['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self._save_state()

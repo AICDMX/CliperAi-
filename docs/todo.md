@@ -16,4 +16,5 @@
 - [x] bump version tooling (`uv run bump2version ...`) + Makefile command
 - [ ] silance removal option. so cut down silence if its more then n milseconds and make it only y milseconds SpeechBrain VAD
 - [ ] add Diarization so we know who said what. we can have diffrent color subtitles. whisperx already has a version of this. pyannote has one as well. 
-- [ ] have settings. where we have all the defualt settings. add a tui shortcut to edit it. in it have a way to limit the max cpu used by ffmpeg. both as a function of -1 meaning leave one cpu unused. and 5 meaning use 5 cpus. 
+- [ ] have settings. where we have all the defualt settings. add a tui shortcut to edit it. in it have a way to limit the max cpu used by ffmpeg. both as a function of -1 meaning leave one cpu unused. and 5 meaning use 5 cpus.
+- [ ] normalize sound. prevent peeks and vallies. 
