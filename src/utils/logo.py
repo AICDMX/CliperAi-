@@ -6,6 +6,11 @@ from typing import Optional, Sequence
 
 
 DEFAULT_BUILTIN_LOGO_PATH = "assets/logo.png"
+_ALLOWED_LOGO_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _is_allowed_logo_file(path: Path) -> bool:
+    return path.suffix.lower() in _ALLOWED_LOGO_SUFFIXES
 
 
 def _get_app_root() -> Path:
@@ -26,7 +31,7 @@ def _coerce_to_existing_logo_file(candidate: Optional[str]) -> Optional[Path]:
     # Treat "assets/..." as a logical path anchored at the app root (not CWD).
     if candidate_str.startswith("assets/"):
         anchored = _get_app_root() / candidate_str
-        if anchored.exists() and anchored.is_file():
+        if anchored.exists() and anchored.is_file() and _is_allowed_logo_file(anchored):
             return anchored.resolve()
         return None
 
@@ -40,6 +45,8 @@ def _coerce_to_existing_logo_file(candidate: Optional[str]) -> Optional[Path]:
         return None
 
     if path.exists() and path.is_file():
+        if not _is_allowed_logo_file(path):
+            return None
         return path.resolve()
 
     return None
