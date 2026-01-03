@@ -6,9 +6,14 @@ from typing import Dict, List, Optional, Set
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.events import Resize
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, DataTable, Footer, Header, Input, RichLog, Static
+
+# Minimum terminal size for proper rendering
+MIN_WIDTH = 80
+MIN_HEIGHT = 20
 
 from src.utils import get_state_manager
 from src.utils.open_path import open_path
@@ -257,17 +262,66 @@ class CliperTUI(App):
     CSS = """
     Screen { layout: vertical; }
     #main { height: 1fr; }
-    #library { width: 2fr; }
-    #right { width: 1fr; }
-    #details { height: auto; padding: 1 2; border: solid gray; }
+
+    /* Library panel - responsive width with constraints */
+    #library {
+        width: 2fr;
+        min-width: 30;
+        max-width: 100;
+    }
+
+    /* Right panel - collapsible on narrow terminals */
+    #right {
+        width: 1fr;
+        min-width: 25;
+    }
+
+    /* Details section - scrollable for long content */
+    #details {
+        height: auto;
+        max-height: 12;
+        padding: 1 2;
+        border: solid gray;
+        overflow-y: auto;
+    }
+
     #open-actions { height: auto; padding: 1 2; }
-    #jobs { height: 12; border: solid gray; }
-    #logs { height: 1fr; border: solid gray; }
+
+    /* Jobs table - scrollable with min/max height */
+    #jobs {
+        height: 12;
+        min-height: 5;
+        max-height: 20;
+        border: solid gray;
+        overflow-y: auto;
+    }
+
+    /* Logs - flexible height, scrollable */
+    #logs {
+        height: 1fr;
+        min-height: 8;
+        border: solid gray;
+    }
+
+    /* Size warning overlay */
+    #size-warning {
+        dock: bottom;
+        height: auto;
+        background: $warning;
+        color: $text;
+        padding: 0 1;
+        display: none;
+    }
+
     .label { margin: 1 2 0 2; }
     #title { padding: 1 2; text-style: bold; }
     Input { margin: 0 2; }
     Checkbox { margin: 1 2; }
     .buttons { margin: 1 2; }
+
+    /* Compact mode - triggered by on_resize handler */
+    .compact #right { display: none; }
+    .compact #library { width: 100%; max-width: 100%; }
     """
 
     BINDINGS = [
@@ -279,6 +333,7 @@ class CliperTUI(App):
         Binding("p", "enqueue_process_shorts", "Process Shorts"),
         Binding("r", "refresh", "Refresh"),
         Binding("s", "settings", "Settings"),
+        Binding("backslash", "toggle_sidebar", "Toggle Sidebar"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -330,6 +385,7 @@ class CliperTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static(f"Terminal too small! Resize to at least {MIN_WIDTH}x{MIN_HEIGHT}", id="size-warning")
         with Horizontal(id="main"):
             yield DataTable(id="library")
             with Vertical(id="right"):
@@ -354,7 +410,35 @@ class CliperTUI(App):
         logs = self.query_one("#logs", RichLog)
         logs.write("[dim]Ready.[/dim]")
 
+        # Check initial size and apply responsive layout
+        self._update_layout_for_size(self.size.width, self.size.height)
+
         self.refresh_all()
+
+    def on_resize(self, event: Resize) -> None:
+        """Handle terminal resize - toggle compact mode and show warnings."""
+        self._update_layout_for_size(event.size.width, event.size.height)
+
+    def _update_layout_for_size(self, width: int, height: int) -> None:
+        """Update layout based on terminal dimensions."""
+        # Show/hide size warning
+        try:
+            warning = self.query_one("#size-warning", Static)
+            too_small = width < MIN_WIDTH or height < MIN_HEIGHT
+            warning.styles.display = "block" if too_small else "none"
+        except Exception:
+            pass
+
+        # Toggle compact mode for narrow terminals (hide right panel)
+        compact_threshold = 100
+        if width < compact_threshold:
+            self.add_class("compact")
+        else:
+            self.remove_class("compact")
+
+    def action_toggle_sidebar(self) -> None:
+        """Manually toggle the right sidebar (details/jobs/logs panel)."""
+        self.toggle_class("compact")
 
     def refresh_all(self) -> None:
         self.refresh_library()
