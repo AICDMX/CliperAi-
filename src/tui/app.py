@@ -179,7 +179,8 @@ class CliperTUI(App):
             open_video_btn = self.query_one("#open_video", Button)
             open_output_btn = self.query_one("#open_output", Button)
             open_video_btn.disabled = not (succeeded and self._selected_final_video_path and self._selected_final_video_path.exists())
-            open_output_btn.disabled = not (succeeded and self._selected_run_output_dir and self._selected_run_output_dir.exists())
+            # Output folder button is always enabled - falls back to general output/ folder
+            open_output_btn.disabled = False
         except Exception:
             pass
 
@@ -191,7 +192,7 @@ class CliperTUI(App):
                 yield Static("Select a video", id="details")
                 with Horizontal(id="open-actions"):
                     yield Button("Open Video", id="open_video", disabled=True)
-                    yield Button("Open Output Folder", id="open_output", disabled=True)
+                    yield Button("Open Output Folder", id="open_output")
                 yield DataTable(id="jobs")
                 yield RichLog(id="logs", markup=True)
         yield Footer()
@@ -500,13 +501,19 @@ class CliperTUI(App):
             return
 
         if event.button.id == "open_output":
-            if not self._selected_run_output_dir:
-                self.query_one("#logs", RichLog).write("[yellow]No output folder available for the selected job.[/yellow]")
-                return
+            logs = self.query_one("#logs", RichLog)
+            # Use job-specific output dir if available, otherwise fall back to general output folder
+            target_dir = self._selected_run_output_dir
+            if not target_dir or not target_dir.exists():
+                target_dir = Path("output").resolve()
+                if not target_dir.exists():
+                    target_dir.mkdir(parents=True, exist_ok=True)
+            logs.write(f"[dim]Opening folder:[/dim] {target_dir}")
             try:
-                open_path(self._selected_run_output_dir)
+                open_path(target_dir)
+                logs.write("[green]Open command sent successfully[/green]")
             except Exception as e:
-                self.query_one("#logs", RichLog).write(f"[red]Failed to open output folder:[/red] {e}")
+                logs.write(f"[red]Failed to open output folder:[/red] {e}")
             return
 
     def _handle_core_event(self, event: object) -> None:
