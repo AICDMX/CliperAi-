@@ -6,11 +6,36 @@ from typing import Optional, Sequence
 
 
 DEFAULT_BUILTIN_LOGO_PATH = "assets/logo.png"
-_ALLOWED_LOGO_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+_ALLOWED_LOGO_SUFFIXES = {".png", ".jpg", ".jpeg"}
 
 
 def _is_allowed_logo_file(path: Path) -> bool:
     return path.suffix.lower() in _ALLOWED_LOGO_SUFFIXES
+
+
+def _looks_like_png(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(8) == b"\x89PNG\r\n\x1a\n"
+    except OSError:
+        return False
+
+
+def _looks_like_jpeg(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(3) == b"\xff\xd8\xff"
+    except OSError:
+        return False
+
+
+def _has_expected_image_signature(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        return _looks_like_png(path)
+    if suffix in {".jpg", ".jpeg"}:
+        return _looks_like_jpeg(path)
+    return False
 
 
 def _get_app_root() -> Path:
@@ -31,21 +56,21 @@ def _coerce_to_existing_logo_file(candidate: Optional[str]) -> Optional[Path]:
     # Treat "assets/..." as a logical path anchored at the app root (not CWD).
     if candidate_str.startswith("assets/"):
         anchored = _get_app_root() / candidate_str
-        if anchored.exists() and anchored.is_file() and _is_allowed_logo_file(anchored):
+        if (
+            anchored.exists()
+            and anchored.is_file()
+            and _is_allowed_logo_file(anchored)
+            and _has_expected_image_signature(anchored)
+        ):
             return anchored.resolve()
         return None
 
     path = Path(candidate_str).expanduser()
 
-    if path.is_dir():
-        for filename in ("logo.png", "logo.jpg", "logo.jpeg", "logo.webp"):
-            maybe = path / filename
-            if maybe.exists() and maybe.is_file():
-                return maybe.resolve()
-        return None
-
     if path.exists() and path.is_file():
         if not _is_allowed_logo_file(path):
+            return None
+        if not _has_expected_image_signature(path):
             return None
         return path.resolve()
 
@@ -92,7 +117,7 @@ def is_valid_logo_location(location: Optional[str]) -> bool:
 
 def coerce_logo_file(location: Optional[str]) -> Optional[str]:
     """
-    Convierte una ubicación (archivo o directorio) a un path de archivo existente.
+    Convierte una ubicación (archivo) a un path de archivo existente.
     No aplica fallback: si es inválido, retorna None.
     """
     resolved = _coerce_to_existing_logo_file(location)

@@ -118,11 +118,16 @@ class SettingDefinition:
 
 
 def _normalize_logo_path(value: str) -> str:
-    from src.utils.logo import DEFAULT_BUILTIN_LOGO_PATH, is_valid_logo_location, normalize_logo_setting_value
+    from pathlib import Path
+
+    from src.utils.logo import DEFAULT_BUILTIN_LOGO_PATH, coerce_logo_file, normalize_logo_setting_value
 
     candidate = (value or "").strip() or DEFAULT_BUILTIN_LOGO_PATH
-    if not is_valid_logo_location(candidate):
-        raise ValueError("Must be an existing image file or a directory containing logo.{png,jpg,jpeg,webp}")
+    suffix = Path(candidate).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg"}:
+        raise ValueError("Logo must be an existing .png, .jpg, or .jpeg image file")
+    if coerce_logo_file(candidate) is None:
+        raise ValueError("Logo file not found or invalid (must be an existing .png, .jpg, or .jpeg image file)")
     return normalize_logo_setting_value(candidate)
 
 
@@ -135,11 +140,11 @@ APP_SETTINGS: Tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="logo_path",
         group="branding",
-        label="Logo path (file or directory):",
+        label="Logo image file (.png/.jpg):",
         python_type=str,
         default="assets/logo.png",
-        placeholder="assets/logo.png",
-        help_text="Used for video watermarking where supported.",
+        placeholder="assets/logo.png or /abs/path/logo.png",
+        help_text="Used for video watermarking where supported. Must be a PNG or JPG file.",
         normalize=_normalize_logo_path,
     ),
 )

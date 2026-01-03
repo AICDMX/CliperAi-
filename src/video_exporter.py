@@ -97,7 +97,7 @@ class VideoExporter:
             face_tracking_strategy: "keep_in_frame" (menos movimiento) o "centered" (siempre centrado)
             face_tracking_sample_rate: Procesar cada N frames (default: 3 = 3x speedup)
             add_logo: Si True, superpone el logo en el video.
-            logo_path: Ruta al archivo del logo o a un directorio que contenga logo.(png|jpg|jpeg|webp).
+            logo_path: Ruta al archivo del logo (solo .png/.jpg/.jpeg).
             logo_position: Posición del logo ("top-right", "top-left", "bottom-right", "bottom-left").
             logo_scale: Escala del logo relativa al ancho del video (0.1 = 10%).
             trim_ms_start: Milisegundos para recortar al inicio (scaffold; aún no se aplica).
@@ -210,7 +210,14 @@ class VideoExporter:
 
         srt_file = Path(srt_path) if srt_path else None
         has_subtitles = bool(srt_file and srt_file.exists())
-        has_logo = bool(add_logo and logo_path and Path(logo_path).exists())
+        resolved_logo_path: Optional[str] = None
+        if add_logo:
+            from src.utils.logo import coerce_logo_file
+
+            resolved_logo_path = coerce_logo_file(logo_path)
+            if not resolved_logo_path:
+                logger.warning("Logo overlay requested but no valid logo file found; skipping logo.")
+        has_logo = bool(add_logo and resolved_logo_path)
 
         # Use a two-step process when both logo and subtitles are enabled to avoid subtitle duplication bugs.
         needs_two_steps = has_logo and has_subtitles
@@ -231,7 +238,7 @@ class VideoExporter:
                     "-i",
                     str(video_path_p),
                     "-i",
-                    str(logo_path),
+                    str(resolved_logo_path),
                     "-filter_complex",
                     ";".join(logo_chains),
                     "-map",
@@ -285,7 +292,7 @@ class VideoExporter:
                     "-i",
                     str(video_path_p),
                     "-i",
-                    str(logo_path),
+                    str(resolved_logo_path),
                     "-filter_complex",
                     ";".join(logo_chains),
                     "-map",
