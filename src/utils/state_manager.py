@@ -11,7 +11,7 @@ Este módulo me permite:
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from datetime import datetime
 import uuid
 
@@ -39,12 +39,18 @@ class StateManager:
     }
     """
 
-    def __init__(self, state_file: str = "temp/project_state.json"):
+    def __init__(
+        self,
+        state_file: str = "temp/project_state.json",
+        *,
+        app_root: Optional[Union[str, Path]] = None,
+        settings_file: Optional[Union[str, Path]] = None,
+    ):
         # Donde guardo el estado del proyecto
         self.state_file = Path(state_file)
 
         # Root estable del proyecto (para rutas que no dependen del CWD)
-        self.app_root = Path(__file__).resolve().parents[2]
+        self.app_root = Path(app_root) if app_root is not None else Path(__file__).resolve().parents[2]
 
         # Me aseguro de que la carpeta temp/ exista
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +63,7 @@ class StateManager:
         self.jobs_state = self._load_jobs_state()
 
         # Settings globales de la app (persistentes)
-        self.settings_file = self.app_root / "config" / "app_settings.json"
+        self.settings_file = Path(settings_file) if settings_file is not None else (self.app_root / "config" / "app_settings.json")
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         self.settings = self._load_settings()
         if not isinstance(self.settings, dict):
@@ -448,6 +454,7 @@ class StateManager:
 
 # Función helper para obtener el state manager global
 _state_manager_instance = None
+_state_manager_init_kwargs: Dict[str, object] = {}
 
 def get_state_manager() -> StateManager:
     """
@@ -456,5 +463,5 @@ def get_state_manager() -> StateManager:
     """
     global _state_manager_instance
     if _state_manager_instance is None:
-        _state_manager_instance = StateManager()
+        _state_manager_instance = StateManager(**(_state_manager_init_kwargs or {}))
     return _state_manager_instance

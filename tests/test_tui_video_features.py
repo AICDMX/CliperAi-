@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import shutil
 import subprocess
@@ -58,10 +59,14 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
         import src.utils.state_manager as state_manager_module
 
         state_manager_module._state_manager_instance = None
+        settings_file = tmp_path / "config" / "app_settings.json"
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        state_manager_module._state_manager_init_kwargs = {"app_root": tmp_path, "settings_file": settings_file}
 
         from src.core.events import LogEvent, LogLevel, StateEvent
         from src.core.models import JobStatus, JobStep
         import src.tui.app as tui_app_module
+        from src.utils.logo import DEFAULT_BUILTIN_LOGO_PATH
 
         fixture_path = tmp_path / "dec 9th promo video.mp4"
         _create_fixture_video_mp4(fixture_path)
@@ -140,10 +145,50 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
         app = tui_app_module.CliperTUI()
 
         async with app.run_test(size=(120, 40)) as pilot:
-            # Repro reported crash path: `a` to add videos should not throw.
-            await pilot.press("a")
+            # Start from a known settings baseline.
+            app.state_manager.settings = {}
+            app.state_manager.set_setting("logo_path", DEFAULT_BUILTIN_LOGO_PATH)
+
+            # Settings entrypoint (hotkey) + Save persists.
+            await pilot.press("s")
 
             from textual.widgets import Button, DataTable, Input, RichLog
+
+            def has_settings_logo_input() -> bool:
+                try:
+                    app.screen.query_one("#setting_logo_path", Input)
+                    return True
+                except Exception:
+                    return False
+
+            await _wait_until(pilot, has_settings_logo_input)
+
+            custom_logo = tmp_path / "custom_logo.png"
+            custom_logo.write_bytes(b"")
+            app.screen.query_one("#setting_logo_path", Input).value = str(custom_logo)
+            app.screen.query_one("#save", Button).press()
+
+            await _wait_until(pilot, lambda: not has_settings_logo_input())
+            assert app.state_manager.get_setting("logo_path") == str(custom_logo)
+            persisted = json.loads(settings_file.read_text(encoding="utf-8"))
+            assert persisted.get("logo_path") == str(custom_logo)
+
+            # Settings entrypoint (button) + Cancel does not persist.
+            app.screen.query_one("#settings", Button).press()
+            await _wait_until(pilot, has_settings_logo_input)
+
+            other_logo = tmp_path / "other_logo.png"
+            other_logo.write_bytes(b"")
+            app.screen.query_one("#setting_logo_path", Input).value = str(other_logo)
+            app.screen.query_one("#cancel", Button).press()
+
+            await _wait_until(pilot, lambda: not has_settings_logo_input())
+            assert app.state_manager.get_setting("logo_path") == str(custom_logo)
+            persisted = json.loads(settings_file.read_text(encoding="utf-8"))
+            assert persisted.get("logo_path") == str(custom_logo)
+
+            # Repro reported crash path: `a` to add videos should not throw.
+            await pilot.press("a")
 
             def has_paths_input() -> bool:
                 try:
