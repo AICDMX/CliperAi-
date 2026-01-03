@@ -91,5 +91,4 @@ For schema-defined keys, `set_setting` validates/normalizes before persisting.
 
 ## Existing settings
 
-- `logo_path`: Default logo location for export workflows (validated/normalized via `src/utils/logo.py`).
-
+- `logo_path`: Default logo image file for export workflows (must be an existing `.png`/`.jpg`/`.jpeg`, validated/normalized via `src/utils/logo.py`).

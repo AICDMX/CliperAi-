@@ -152,7 +152,7 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
             # Settings entrypoint (hotkey) + Save persists.
             await pilot.press("s")
 
-            from textual.widgets import Button, DataTable, Input, RichLog
+            from textual.widgets import Button, DataTable, Input, RichLog, Static
 
             def has_settings_logo_input() -> bool:
                 try:
@@ -163,9 +163,28 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
 
             await _wait_until(pilot, has_settings_logo_input)
 
+            # Invalid logo paths should show a clear error and disable Save.
+            invalid_logo = tmp_path / "custom_logo.gif"
+            invalid_logo.write_bytes(b"")
+            app.screen.query_one("#setting_logo_path", Input).value = str(invalid_logo)
+            # Force a validation pass (programmatic value changes may not emit Input.Changed).
+            app.screen.query_one("#save", Button).press()
+
+            def save_disabled_with_logo_error() -> bool:
+                try:
+                    err = app.screen.query_one("#setting_logo_path_error", Static)
+                    save = app.screen.query_one("#save", Button)
+                    return bool(save.disabled) and bool(err.display) and bool(str(getattr(err, "content", "")).strip())
+                except Exception:
+                    return False
+
+            await _wait_until(pilot, save_disabled_with_logo_error)
+
             custom_logo = tmp_path / "custom_logo.png"
-            custom_logo.write_bytes(b"")
+            custom_logo.write_bytes(b"\x89PNG\r\n\x1a\n")
             app.screen.query_one("#setting_logo_path", Input).value = str(custom_logo)
+
+            await _wait_until(pilot, lambda: not app.screen.query_one("#save", Button).disabled)
             app.screen.query_one("#save", Button).press()
 
             await _wait_until(pilot, lambda: not has_settings_logo_input())
@@ -178,7 +197,7 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
             await _wait_until(pilot, has_settings_logo_input)
 
             other_logo = tmp_path / "other_logo.png"
-            other_logo.write_bytes(b"")
+            other_logo.write_bytes(b"\x89PNG\r\n\x1a\n")
             app.screen.query_one("#setting_logo_path", Input).value = str(other_logo)
             app.screen.query_one("#cancel", Button).press()
 
