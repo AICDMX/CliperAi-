@@ -24,6 +24,14 @@ from src.core.events import JobStatusEvent, LogEvent, ProgressEvent, StateEvent
 from src.core.job_runner import JobRunner
 from src.core.models import JobSpec, JobState, JobStep
 from src.config.settings_schema import iter_app_setting_groups, list_app_settings_by_group
+from src.core.dependency_manager import (
+    DependencyProgress,
+    DependencyReporter,
+    DependencySpec,
+    DependencyStatus,
+    build_required_dependencies,
+    ensure_all_required,
+)
 
 
 class AddVideosModal(ModalScreen[Optional[Dict[str, object]]]):
@@ -282,6 +290,157 @@ class SettingsModal(ModalScreen[Optional[Dict[str, object]]]):
         self.dismiss(updated)
 
 
+class DependencyModal(ModalScreen[Optional[Dict[str, object]]]):
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel"),
+    ]
+
+    def __init__(self, *, specs: List[DependencySpec], auto_install: bool = False):
+        super().__init__()
+        self._specs = specs
+        self._auto_install = auto_install
+        self._status: Dict[str, str] = {}  # key -> status text
+        self._is_downloading = False
+        self._cancelled = False
+
+    def compose(self) -> ComposeResult:
+        yield Static("Dependencies", id="title")
+        yield Static(
+            "Required models for transcription. Missing items will be downloaded.",
+            id="dep_subtitle",
+        )
+
+        with Vertical(id="dep_modal"):
+            with ScrollableContainer(id="dep_body"):
+                table = DataTable(id="dep_table")
+                table.add_columns("Dependency", "Status")
+                yield table
+                yield Static("", id="dep_progress_text")
+
+            with Horizontal(classes="buttons", id="dep_buttons"):
+                yield Button("Install Missing", id="install", variant="primary")
+                yield Button("Close", id="close")
+
+    def on_mount(self) -> None:
+        self._refresh_table()
+        if self._auto_install:
+            self.call_later(self._start_install)
+
+    def _refresh_table(self) -> None:
+        table = self.query_one("#dep_table", DataTable)
+        table.clear()
+        for spec in self._specs:
+            status = self._status.get(spec.key, "Checking...")
+            table.add_row(spec.description, status, key=spec.key)
+
+    def _update_status(self, key: str, status: str) -> None:
+        self._status[key] = status
+        try:
+            table = self.query_one("#dep_table", DataTable)
+            for row_key in list(table.rows.keys()):
+                if getattr(row_key, "value", str(row_key)) == key:
+                    row_idx = table.get_row_index(row_key)
+                    spec_desc = next((s.description for s in self._specs if s.key == key), key)
+                    table.update_cell_at((row_idx, 1), status)
+                    break
+        except Exception:
+            pass
+
+    def _update_progress_text(self, text: str) -> None:
+        try:
+            self.query_one("#dep_progress_text", Static).update(text)
+        except Exception:
+            pass
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "close":
+            if self._is_downloading:
+                self._cancelled = True
+            self.dismiss({"cancelled": self._cancelled})
+            return
+
+        if event.button.id == "install":
+            self._start_install()
+
+    def _start_install(self) -> None:
+        if self._is_downloading:
+            return
+        self._is_downloading = True
+        self._cancelled = False
+
+        try:
+            self.query_one("#install", Button).disabled = True
+        except Exception:
+            pass
+
+        # Check current status first
+        for spec in self._specs:
+            self._update_status(spec.key, "Checking...")
+
+        def run_ensure() -> None:
+            call_from_thread = self.call_from_thread
+
+            class _TUIDependencyReporter(DependencyReporter):
+                def __init__(reporter_self):
+                    reporter_self._modal = self
+
+                def report(reporter_self, event: DependencyProgress) -> None:
+                    status_text = ""
+                    if event.status == DependencyStatus.CHECKING:
+                        status_text = "Checking..."
+                    elif event.status == DependencyStatus.DOWNLOADING:
+                        status_text = f"Downloading... (attempt {event.attempt})"
+                    elif event.status == DependencyStatus.SKIPPED:
+                        status_text = "[green]Installed[/green]"
+                    elif event.status == DependencyStatus.DONE:
+                        status_text = "[green]Downloaded[/green]"
+                    elif event.status == DependencyStatus.ERROR:
+                        status_text = f"[red]Error: {event.message}[/red]"
+
+                    call_from_thread(reporter_self._modal._update_status, event.key, status_text)
+                    progress_text = f"[{event.index}/{event.total}] {event.description}"
+                    if event.message and event.status == DependencyStatus.DOWNLOADING:
+                        progress_text += f" - {event.message}"
+                    call_from_thread(reporter_self._modal._update_progress_text, progress_text)
+
+                def is_cancelled(reporter_self) -> bool:
+                    return reporter_self._modal._cancelled
+
+            reporter = _TUIDependencyReporter()
+            result = ensure_all_required(self._specs, reporter=reporter, max_attempts=2)
+
+            def finish():
+                self._is_downloading = False
+                try:
+                    self.query_one("#install", Button).disabled = False
+                except Exception:
+                    pass
+
+                if result.canceled:
+                    self._update_progress_text("[yellow]Cancelled[/yellow]")
+                elif result.failed:
+                    failed_list = ", ".join(result.failed.keys())
+                    self._update_progress_text(f"[red]Some failed: {failed_list}[/red]")
+                else:
+                    self._update_progress_text("[green]All dependencies ready![/green]")
+
+            call_from_thread(finish)
+
+        self.app.run_worker(run_ensure, thread=True)
+
+
+def check_missing_dependencies(specs: List[DependencySpec]) -> List[DependencySpec]:
+    """Return list of specs that are not yet installed."""
+    missing = []
+    for spec in specs:
+        try:
+            if not spec.check():
+                missing.append(spec)
+        except Exception:
+            missing.append(spec)
+    return missing
+
+
 class CliperTUI(App):
     TITLE = "CLIPER"
     SUB_TITLE = "Video Clipper (Textual)"
@@ -362,7 +521,8 @@ class CliperTUI(App):
         color: $text 70%;
     }
 
-    #settings_body { padding: 1 2; }
+    #settings_body { padding: 1 2; height: auto; }
+    .settings-section { height: auto; }
     #settings_buttons {
         margin: 0;
         padding: 1 2;
@@ -386,11 +546,11 @@ class CliperTUI(App):
     .section-desc { color: $text 70%; margin: 0 0 1 0; }
     .section-note { color: $text 70%; margin-top: 1; }
 
-    .settings-group { margin-top: 1; padding: 1 1; border: solid $panel; }
+    .settings-group { margin-top: 1; padding: 1 1; border: solid $panel; height: auto; }
     .group-title { text-style: bold; margin: 0 0 1 0; }
     .group-desc { color: $text 70%; margin: 0 0 1 0; }
 
-    .setting-field { margin: 1 0; }
+    .setting-field { margin: 1 0; height: auto; }
     .field-label { text-style: bold; }
     .help-text { color: $text 70%; }
     .default-hint { color: $text 60%; }
@@ -398,6 +558,42 @@ class CliperTUI(App):
 
     #settings_modal Input { margin: 0; }
     Input.invalid { border: heavy $error; }
+
+    /* Dependency modal styles */
+    #dep_modal {
+        width: 90%;
+        max-width: 100;
+        height: auto;
+        min-height: 12;
+        margin: 1 2;
+        border: heavy $panel;
+        background: $surface;
+    }
+
+    #dep_subtitle {
+        margin: 0 2 1 2;
+        color: $text 70%;
+    }
+
+    #dep_body { padding: 1 2; height: auto; }
+
+    #dep_table {
+        height: 10;
+        min-height: 5;
+        border: solid $panel;
+    }
+
+    #dep_progress_text {
+        margin-top: 1;
+        color: $text 80%;
+    }
+
+    #dep_buttons {
+        margin: 0;
+        padding: 1 2;
+        border-top: solid $panel;
+        background: $surface;
+    }
 
     /* Compact mode - triggered by on_resize handler */
     .compact #right { display: none; }
@@ -413,6 +609,7 @@ class CliperTUI(App):
         Binding("p", "enqueue_process_shorts", "Process Shorts"),
         Binding("r", "refresh", "Refresh"),
         Binding("s", "settings", "Settings"),
+        Binding("d", "dependencies", "Dependencies"),
         Binding("backslash", "toggle_sidebar", "Toggle Sidebar"),
         Binding("q", "quit", "Quit"),
     ]
@@ -428,6 +625,7 @@ class CliperTUI(App):
         self._running_job_id: Optional[str] = None
         self._selected_run_output_dir: Optional[Path] = None
         self._selected_final_video_path: Optional[Path] = None
+        self._startup_dep_check_done = False
 
     def _load_selected_job_open_targets(self, job_id: Optional[str]) -> None:
         run_output_dir: Optional[Path] = None
@@ -495,6 +693,11 @@ class CliperTUI(App):
 
         self.refresh_all()
 
+        # Check dependencies on startup
+        if not self._startup_dep_check_done:
+            self._startup_dep_check_done = True
+            self.call_later(self._check_startup_dependencies)
+
     def on_resize(self, event: Resize) -> None:
         """Handle terminal resize - toggle compact mode and show warnings."""
         self._update_layout_for_size(event.size.width, event.size.height)
@@ -526,6 +729,47 @@ class CliperTUI(App):
         if self.selected_job_id:
             self._load_selected_job_open_targets(self.selected_job_id)
         self._maybe_start_next_job()
+
+    def _check_startup_dependencies(self) -> None:
+        """Check for missing dependencies on startup and offer to install."""
+        logs = self.query_one("#logs", RichLog)
+        logs.write("[dim]Checking dependencies...[/dim]")
+
+        def check_in_background() -> None:
+            specs = build_required_dependencies()
+            missing = check_missing_dependencies(specs)
+
+            def show_result():
+                if missing:
+                    logs.write(f"[yellow]Missing {len(missing)} dependencies. Press 'd' to install.[/yellow]")
+                    # Auto-show modal with missing dependencies
+                    self.push_screen(
+                        DependencyModal(specs=specs, auto_install=False),
+                        callback=self._on_dependency_modal_dismissed,
+                    )
+                else:
+                    logs.write("[green]All dependencies ready.[/green]")
+
+            self.call_from_thread(show_result)
+
+        self.run_worker(check_in_background, thread=True)
+
+    async def action_dependencies(self) -> None:
+        """Open the dependency management modal."""
+        specs = build_required_dependencies()
+        await self.push_screen(
+            DependencyModal(specs=specs, auto_install=False),
+            callback=self._on_dependency_modal_dismissed,
+        )
+
+    def _on_dependency_modal_dismissed(self, result: Optional[Dict[str, object]]) -> None:
+        if not result:
+            return
+        logs = self.query_one("#logs", RichLog)
+        if result.get("cancelled"):
+            logs.write("[yellow]Dependency check cancelled.[/yellow]")
+        else:
+            logs.write("[green]Dependency check complete.[/green]")
 
     def refresh_library(self) -> None:
         self.videos = [
@@ -596,7 +840,11 @@ class CliperTUI(App):
             self.selected_video_ids.remove(video_id)
         else:
             self.selected_video_ids.add(video_id)
+        current_row = table.cursor_row
         self.refresh_library()
+        # Move cursor to next row for easy bulk selection
+        if current_row is not None and current_row + 1 < table.row_count:
+            table.move_cursor(row=current_row + 1)
 
     async def action_add_videos(self) -> None:
         # Use a non-blocking modal flow to avoid Textual worker requirements that can
