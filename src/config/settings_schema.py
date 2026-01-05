@@ -131,12 +131,147 @@ def _normalize_logo_path(value: str) -> str:
     return normalize_logo_setting_value(candidate)
 
 
+# --- Branding normalizers ---
+
+
+def _normalize_logo_position(value: str) -> str:
+    allowed = {"top-right", "top-left", "bottom-right", "bottom-left"}
+    v = value.strip().lower()
+    if v not in allowed:
+        raise ValueError(f"Must be one of: {', '.join(sorted(allowed))}")
+    return v
+
+
+def _normalize_logo_scale(value: float) -> float:
+    if value < 0.01 or value > 1.0:
+        raise ValueError("Must be between 0.01 and 1.0")
+    return value
+
+
+# --- Clip generation normalizers ---
+
+
+def _normalize_positive_int(value: int) -> int:
+    if value < 1:
+        raise ValueError("Must be a positive integer (>= 1)")
+    return value
+
+
+def _normalize_non_negative_int(value: int) -> int:
+    if value < 0:
+        raise ValueError("Must be non-negative (>= 0)")
+    return value
+
+
+# --- Subtitle normalizers ---
+
+SUBTITLE_PRESETS = {"default", "bold", "yellow", "tiktok", "small", "tiny"}
+
+
+def _normalize_subtitle_mode(value: str) -> str:
+    v = value.strip().lower()
+    if v not in {"preset", "custom"}:
+        raise ValueError("Must be 'preset' or 'custom'")
+    return v
+
+
+def _normalize_subtitle_preset(value: str) -> str:
+    v = value.strip().lower()
+    if v not in SUBTITLE_PRESETS:
+        raise ValueError(f"Must be one of: {', '.join(sorted(SUBTITLE_PRESETS))}")
+    return v
+
+
+NAMED_COLORS = {"yellow", "white", "black", "red", "green", "blue", "cyan", "magenta"}
+
+
+def _normalize_subtitle_color(value: str) -> str:
+    v = value.strip().lower()
+    if v in NAMED_COLORS:
+        return v
+    # Validate hex format #RRGGBB
+    if v.startswith("#") and len(v) == 7:
+        try:
+            int(v[1:], 16)
+            return v
+        except ValueError:
+            pass
+    raise ValueError(f"Must be a color name ({', '.join(sorted(NAMED_COLORS))}) or #RRGGBB hex code")
+
+
+def _normalize_font_size(value: int) -> int:
+    if value < 8 or value > 72:
+        raise ValueError("Font size must be between 8 and 72")
+    return value
+
+
+def _normalize_outline_width(value: int) -> int:
+    if value < 0 or value > 10:
+        raise ValueError("Outline width must be between 0 and 10")
+    return value
+
+
+def _normalize_shadow(value: int) -> int:
+    if value < 0 or value > 5:
+        raise ValueError("Shadow depth must be between 0 and 5")
+    return value
+
+
+def _normalize_positive_float(value: float) -> float:
+    if value <= 0:
+        raise ValueError("Must be a positive number")
+    return value
+
+
+# --- Export normalizers ---
+
+
+def _normalize_aspect_ratio(value: str) -> str:
+    v = value.strip()
+    if v == "":
+        return ""  # None/original
+    allowed = {"16:9", "9:16", "1:1", "4:3", "3:4"}
+    if v not in allowed:
+        raise ValueError(f"Must be one of: {', '.join(sorted(allowed))} or blank for original")
+    return v
+
+
+def _normalize_crf(value: int) -> int:
+    if value < 0 or value > 51:
+        raise ValueError("CRF must be between 0 and 51")
+    return value
+
+
+def _normalize_face_tracking_strategy(value: str) -> str:
+    v = value.strip().lower()
+    if v not in {"keep_in_frame", "centered"}:
+        raise ValueError("Must be 'keep_in_frame' or 'centered'")
+    return v
+
+
+def _normalize_sample_rate(value: int) -> int:
+    if value < 1 or value > 30:
+        raise ValueError("Sample rate must be between 1 and 30")
+    return value
+
+
+def _normalize_ffmpeg_threads(value: int) -> int:
+    # 0 = auto-detect, positive = specific thread count, negative = all minus N
+    if value < -16 or value > 64:
+        raise ValueError("Threads must be between -16 and 64 (0=auto, negative=all minus N)")
+    return value
+
+
 APP_SETTING_GROUPS: Tuple[SettingGroup, ...] = (
-    SettingGroup(key="branding", title="Branding", description="Defaults used by export workflows."),
+    SettingGroup(key="branding", title="Branding", description="Logo and watermark settings."),
+    SettingGroup(key="clip_generation", title="Clip Generation", description="Duration and trimming settings for clip detection."),
+    SettingGroup(key="subtitles", title="Subtitles", description="Subtitle styling and formatting."),
+    SettingGroup(key="export", title="Export", description="Video export quality and processing options."),
 )
 
 
 APP_SETTINGS: Tuple[SettingDefinition, ...] = (
+    # --- Branding settings ---
     SettingDefinition(
         key="logo_path",
         group="branding",
@@ -146,6 +281,256 @@ APP_SETTINGS: Tuple[SettingDefinition, ...] = (
         placeholder="assets/logo.png or /abs/path/logo.png",
         help_text="Used for video watermarking where supported. Must be a PNG or JPG file.",
         normalize=_normalize_logo_path,
+    ),
+    SettingDefinition(
+        key="logo_position",
+        group="branding",
+        label="Logo position:",
+        python_type=str,
+        default="top-right",
+        placeholder="top-right, top-left, bottom-right, bottom-left",
+        help_text="Corner position for the logo overlay.",
+        normalize=_normalize_logo_position,
+    ),
+    SettingDefinition(
+        key="logo_scale",
+        group="branding",
+        label="Logo scale (0.01 - 1.0):",
+        python_type=float,
+        default=0.1,
+        placeholder="0.1",
+        help_text="Size of logo relative to video width (0.1 = 10%).",
+        normalize=_normalize_logo_scale,
+    ),
+    # --- Clip generation settings ---
+    SettingDefinition(
+        key="min_clip_duration",
+        group="clip_generation",
+        label="Minimum clip duration (seconds):",
+        python_type=int,
+        default=30,
+        placeholder="30",
+        help_text="Shortest allowed clip length in seconds.",
+        normalize=_normalize_positive_int,
+    ),
+    SettingDefinition(
+        key="max_clip_duration",
+        group="clip_generation",
+        label="Maximum clip duration (seconds):",
+        python_type=int,
+        default=90,
+        placeholder="90",
+        help_text="Longest allowed clip length in seconds.",
+        normalize=_normalize_positive_int,
+    ),
+    SettingDefinition(
+        key="min_clips",
+        group="clip_generation",
+        label="Minimum number of clips:",
+        python_type=int,
+        default=3,
+        placeholder="3",
+        help_text="Minimum clips to generate per video.",
+        normalize=_normalize_positive_int,
+    ),
+    SettingDefinition(
+        key="max_clips",
+        group="clip_generation",
+        label="Maximum number of clips:",
+        python_type=int,
+        default=10,
+        placeholder="10",
+        help_text="Maximum clips to generate per video.",
+        normalize=_normalize_positive_int,
+    ),
+    SettingDefinition(
+        key="trim_ms_start",
+        group="clip_generation",
+        label="Trim from start (ms):",
+        python_type=int,
+        default=0,
+        placeholder="0",
+        help_text="Milliseconds of dead space to trim from clip start.",
+        normalize=_normalize_non_negative_int,
+    ),
+    SettingDefinition(
+        key="trim_ms_end",
+        group="clip_generation",
+        label="Trim from end (ms):",
+        python_type=int,
+        default=0,
+        placeholder="0",
+        help_text="Milliseconds of dead space to trim from clip end.",
+        normalize=_normalize_non_negative_int,
+    ),
+    # --- Subtitle settings ---
+    SettingDefinition(
+        key="subtitle_style_mode",
+        group="subtitles",
+        label="Subtitle style mode:",
+        python_type=str,
+        default="preset",
+        placeholder="preset or custom",
+        help_text="Use 'preset' for built-in styles or 'custom' to define your own.",
+        normalize=_normalize_subtitle_mode,
+    ),
+    SettingDefinition(
+        key="subtitle_preset",
+        group="subtitles",
+        label="Preset style:",
+        python_type=str,
+        default="default",
+        placeholder="default, bold, yellow, tiktok, small, tiny",
+        help_text="Built-in subtitle style (only used when mode is 'preset').",
+        normalize=_normalize_subtitle_preset,
+    ),
+    SettingDefinition(
+        key="subtitle_font_family",
+        group="subtitles",
+        label="Font family:",
+        python_type=str,
+        default="Arial",
+        placeholder="Arial",
+        help_text="Font family for custom subtitles (used when mode is 'custom').",
+    ),
+    SettingDefinition(
+        key="subtitle_font_size",
+        group="subtitles",
+        label="Font size:",
+        python_type=int,
+        default=18,
+        placeholder="18",
+        help_text="Font size in points for custom subtitles (used when mode is 'custom').",
+        normalize=_normalize_font_size,
+    ),
+    SettingDefinition(
+        key="subtitle_primary_color",
+        group="subtitles",
+        label="Primary color:",
+        python_type=str,
+        default="yellow",
+        placeholder="yellow, white, red, #RRGGBB",
+        help_text="Text color for custom subtitles (name or hex, used when mode is 'custom').",
+        normalize=_normalize_subtitle_color,
+    ),
+    SettingDefinition(
+        key="subtitle_outline_color",
+        group="subtitles",
+        label="Outline color:",
+        python_type=str,
+        default="black",
+        placeholder="black, white, #RRGGBB",
+        help_text="Outline/border color for custom subtitles (used when mode is 'custom').",
+        normalize=_normalize_subtitle_color,
+    ),
+    SettingDefinition(
+        key="subtitle_outline_width",
+        group="subtitles",
+        label="Outline width:",
+        python_type=int,
+        default=2,
+        placeholder="2",
+        help_text="Outline thickness 0-10 (used when mode is 'custom').",
+        normalize=_normalize_outline_width,
+    ),
+    SettingDefinition(
+        key="subtitle_shadow",
+        group="subtitles",
+        label="Shadow depth:",
+        python_type=int,
+        default=1,
+        placeholder="1",
+        help_text="Shadow depth 0-5 (used when mode is 'custom').",
+        normalize=_normalize_shadow,
+    ),
+    SettingDefinition(
+        key="subtitle_bold",
+        group="subtitles",
+        label="Bold:",
+        python_type=bool,
+        default=False,
+        placeholder="true or false",
+        help_text="Enable bold text for custom subtitles (used when mode is 'custom').",
+    ),
+    SettingDefinition(
+        key="subtitle_max_chars_per_line",
+        group="subtitles",
+        label="Max characters per line:",
+        python_type=int,
+        default=42,
+        placeholder="42",
+        help_text="Maximum characters before line wrap.",
+        normalize=_normalize_positive_int,
+    ),
+    SettingDefinition(
+        key="subtitle_max_duration",
+        group="subtitles",
+        label="Max subtitle duration (seconds):",
+        python_type=float,
+        default=5.0,
+        placeholder="5.0",
+        help_text="Maximum duration a single subtitle stays on screen.",
+        normalize=_normalize_positive_float,
+    ),
+    # --- Export settings ---
+    SettingDefinition(
+        key="default_aspect_ratio",
+        group="export",
+        label="Default aspect ratio:",
+        python_type=str,
+        default="",
+        placeholder="16:9, 9:16, 1:1 or blank for original",
+        help_text="Default aspect ratio for exports. Leave blank to keep original.",
+        normalize=_normalize_aspect_ratio,
+    ),
+    SettingDefinition(
+        key="video_crf",
+        group="export",
+        label="Video quality (CRF):",
+        python_type=int,
+        default=23,
+        placeholder="23",
+        help_text="Constant Rate Factor 0-51. Lower = better quality, larger file. 18-23 recommended.",
+        normalize=_normalize_crf,
+    ),
+    SettingDefinition(
+        key="ffmpeg_threads",
+        group="export",
+        label="FFmpeg threads:",
+        python_type=int,
+        default=0,
+        placeholder="0",
+        help_text="Thread count: 0=auto, 7=use 7 threads, -2=all CPUs minus 2.",
+        normalize=_normalize_ffmpeg_threads,
+    ),
+    SettingDefinition(
+        key="enable_face_tracking",
+        group="export",
+        label="Enable face tracking:",
+        python_type=bool,
+        default=False,
+        placeholder="true or false",
+        help_text="Use face detection for dynamic reframing (9:16 only).",
+    ),
+    SettingDefinition(
+        key="face_tracking_strategy",
+        group="export",
+        label="Face tracking strategy:",
+        python_type=str,
+        default="keep_in_frame",
+        placeholder="keep_in_frame or centered",
+        help_text="'keep_in_frame' for less movement, 'centered' to always center face.",
+        normalize=_normalize_face_tracking_strategy,
+    ),
+    SettingDefinition(
+        key="face_tracking_sample_rate",
+        group="export",
+        label="Face tracking sample rate:",
+        python_type=int,
+        default=3,
+        placeholder="3",
+        help_text="Process every Nth frame (higher = faster but less smooth).",
+        normalize=_normalize_sample_rate,
     ),
 )
 
@@ -198,3 +583,74 @@ def list_app_settings_by_group() -> Dict[str, List[SettingDefinition]]:
     for definition in APP_SETTINGS:
         grouped.setdefault(definition.group, []).append(definition)
     return grouped
+
+
+# --- Custom subtitle style helpers ---
+
+# ASS color format: &H00BBGGRR (alpha, blue, green, red)
+COLOR_MAP: Dict[str, str] = {
+    "yellow": "&H0000FFFF",
+    "white": "&H00FFFFFF",
+    "black": "&H00000000",
+    "red": "&H000000FF",
+    "green": "&H0000FF00",
+    "blue": "&H00FF0000",
+    "cyan": "&H00FFFF00",
+    "magenta": "&H00FF00FF",
+}
+
+
+def _hex_to_ass_color(hex_color: str) -> str:
+    """Convert #RRGGBB to ASS format &H00BBGGRR."""
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    return f"&H00{b:02X}{g:02X}{r:02X}"
+
+
+def build_custom_subtitle_style(settings: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Build an ffmpeg subtitle style dict from settings.
+
+    Returns a dict compatible with video_exporter's styles format:
+    {
+        "FontName": "Arial",
+        "FontSize": "18",
+        "PrimaryColour": "&H0000FFFF",
+        "OutlineColour": "&H00000000",
+        "Outline": "2",
+        "Shadow": "1",
+        "Bold": "0",
+    }
+    """
+    primary = settings.get("subtitle_primary_color", "yellow")
+    if primary.startswith("#"):
+        primary_color = _hex_to_ass_color(primary)
+    else:
+        primary_color = COLOR_MAP.get(primary, COLOR_MAP["yellow"])
+
+    outline = settings.get("subtitle_outline_color", "black")
+    if outline.startswith("#"):
+        outline_color = _hex_to_ass_color(outline)
+    else:
+        outline_color = COLOR_MAP.get(outline, COLOR_MAP["black"])
+
+    return {
+        "FontName": settings.get("subtitle_font_family", "Arial"),
+        "FontSize": str(settings.get("subtitle_font_size", 18)),
+        "PrimaryColour": primary_color,
+        "OutlineColour": outline_color,
+        "Outline": str(settings.get("subtitle_outline_width", 2)),
+        "Shadow": str(settings.get("subtitle_shadow", 1)),
+        "Bold": "-1" if settings.get("subtitle_bold", False) else "0",
+    }
+
+
+def get_effective_subtitle_style(settings: Dict[str, Any]) -> str:
+    """
+    Returns either the preset name or '__custom__' to signal custom mode.
+    """
+    mode = settings.get("subtitle_style_mode", "preset")
+    if mode == "custom":
+        return "__custom__"
+    return settings.get("subtitle_preset", "default")

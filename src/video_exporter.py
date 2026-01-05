@@ -7,6 +7,7 @@ Usa ffmpeg para cortar con precisión y opcionalmente cambiar aspect ratio.
 """
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -18,6 +19,24 @@ from src.subtitle_generator import SubtitleGenerator
 from src.reframer import FaceReframer
 
 logger = get_logger(__name__)
+
+
+def _resolve_ffmpeg_threads(threads: int) -> int:
+    """
+    Resolve thread count for ffmpeg -threads parameter.
+
+    Args:
+        threads: 0=auto, positive=specific count, negative=all CPUs minus N
+
+    Returns:
+        Actual thread count (0 for auto, or positive integer)
+    """
+    if threads >= 0:
+        return threads
+    # Negative: all CPUs minus N
+    cpu_count = os.cpu_count() or 4
+    result = cpu_count + threads  # threads is negative, so this subtracts
+    return max(1, result)  # At least 1 thread
 
 
 class VideoExporter:
@@ -65,6 +84,7 @@ class VideoExporter:
         add_subtitles: bool = False,
         transcript_path: Optional[str] = None,
         subtitle_style: str = "default",
+        custom_style: Optional[Dict[str, str]] = None,
         organize_by_style: bool = False,
         clip_styles: Optional[Dict[int, str]] = None,
         # Face tracking parameters (PASO3)
@@ -79,6 +99,12 @@ class VideoExporter:
         # Speech-edge trimming parameters (scaffold; not applied yet)
         trim_ms_start: int = 0,
         trim_ms_end: int = 0,
+        # Video quality and performance
+        video_crf: int = 23,
+        ffmpeg_threads: int = 0,
+        # Subtitle formatting
+        subtitle_max_chars_per_line: int = 42,
+        subtitle_max_duration: float = 5.0,
     ) -> List[str]:
         """
         Exporto todos los clips de un video
@@ -161,6 +187,7 @@ class VideoExporter:
                     add_subtitles=add_subtitles,
                     transcript_path=transcript_path,
                     subtitle_style=subtitle_style,
+                    custom_style=custom_style,
                     trim_ms_start=trim_ms_start,
                     trim_ms_end=trim_ms_end,
                     enable_face_tracking=enable_face_tracking,
@@ -170,6 +197,10 @@ class VideoExporter:
                     logo_path=resolved_logo_path,
                     logo_position=logo_position,
                     logo_scale=logo_scale,
+                    video_crf=video_crf,
+                    ffmpeg_threads=ffmpeg_threads,
+                    subtitle_max_chars_per_line=subtitle_max_chars_per_line,
+                    subtitle_max_duration=subtitle_max_duration,
                 )
 
                 if clip_path:
@@ -187,10 +218,13 @@ class VideoExporter:
         output_filename: str = "short.mp4",
         srt_path: Optional[str] = None,
         subtitle_style: str = "default",
+        custom_style: Optional[Dict[str, str]] = None,
         add_logo: bool = False,
         logo_path: Optional[str] = "assets/logo.png",
         logo_position: str = "top-right",
         logo_scale: float = 0.1,
+        video_crf: int = 23,
+        ffmpeg_threads: int = 0,
     ) -> str:
         """
         Exporto un video completo aplicando (opcionalmente) subtítulos y logo.
@@ -233,6 +267,7 @@ class VideoExporter:
                     position=logo_position,
                     scale=logo_scale,
                 )
+                resolved_threads = _resolve_ffmpeg_threads(ffmpeg_threads)
                 cmd1 = [
                     "ffmpeg",
                     "-i",
@@ -253,7 +288,9 @@ class VideoExporter:
                     "-preset",
                     "fast",
                     "-crf",
-                    "23",
+                    str(video_crf),
+                    "-threads",
+                    str(resolved_threads),
                     "-y",
                     str(temp_path_step1),
                 ]
@@ -261,7 +298,7 @@ class VideoExporter:
                 if result1.returncode != 0:
                     raise RuntimeError(f"Error exporting short (step 1): {result1.stderr}")
 
-                subtitle_filter = self._get_subtitle_filter(str(srt_file), subtitle_style)
+                subtitle_filter = self._get_subtitle_filter(str(srt_file), subtitle_style, custom_style)
                 cmd2 = [
                     "ffmpeg",
                     "-i",
@@ -299,11 +336,12 @@ class VideoExporter:
                     logo_out,
                 ]
             elif has_subtitles:
-                subtitle_filter = self._get_subtitle_filter(str(srt_file), subtitle_style)
+                subtitle_filter = self._get_subtitle_filter(str(srt_file), subtitle_style, custom_style)
                 cmd = ["ffmpeg", "-i", str(video_path_p), "-vf", subtitle_filter, "-map", "0:v"]
             else:
                 cmd = ["ffmpeg", "-i", str(video_path_p), "-map", "0:v"]
 
+            resolved_threads = _resolve_ffmpeg_threads(ffmpeg_threads)
             cmd.extend(
                 [
                     "-map",
@@ -316,7 +354,9 @@ class VideoExporter:
                     "-preset",
                     "fast",
                     "-crf",
-                    "23",
+                    str(video_crf),
+                    "-threads",
+                    str(resolved_threads),
                     "-y",
                     str(output_path),
                 ]
@@ -351,6 +391,7 @@ class VideoExporter:
         add_subtitles: bool = False,
         transcript_path: Optional[str] = None,
         subtitle_style: str = "default",
+        custom_style: Optional[Dict[str, str]] = None,
         enable_face_tracking: bool = False,
         face_tracking_strategy: str = "keep_in_frame",
         face_tracking_sample_rate: int = 3,
@@ -361,6 +402,12 @@ class VideoExporter:
         # Speech-edge trimming parameters (scaffold; not applied yet)
         trim_ms_start: int = 0,
         trim_ms_end: int = 0,
+        # Video quality and performance
+        video_crf: int = 23,
+        ffmpeg_threads: int = 0,
+        # Subtitle formatting
+        subtitle_max_chars_per_line: int = 42,
+        subtitle_max_duration: float = 5.0,
     ) -> Optional[Path]:
         clip_id = clip["clip_id"]
         start_time = clip["start_time"]
@@ -383,6 +430,8 @@ class VideoExporter:
                 clip_start=start_time,
                 clip_end=end_time,
                 output_path=str(subtitle_file),
+                max_chars_per_line=subtitle_max_chars_per_line,
+                max_duration=subtitle_max_duration,
             )
 
         video_to_process = video_path
@@ -455,7 +504,7 @@ class VideoExporter:
 
             # If we are NOT doing two steps, add subtitles here
             if not needs_two_steps and add_subtitles and subtitle_file and subtitle_file.exists():
-                subtitle_filter = self._get_subtitle_filter(str(subtitle_file), subtitle_style)
+                subtitle_filter = self._get_subtitle_filter(str(subtitle_file), subtitle_style, custom_style)
                 simple_filters.append(subtitle_filter)
 
             cmd = ["ffmpeg"] + inputs
@@ -488,6 +537,7 @@ class VideoExporter:
             if needs_two_steps:
                 cmd.extend(["-sn"])  # Discard subtitle streams
 
+            resolved_threads = _resolve_ffmpeg_threads(ffmpeg_threads)
             cmd.extend(
                 [
                     "-map",
@@ -499,7 +549,9 @@ class VideoExporter:
                     "-preset",
                     "fast",
                     "-crf",
-                    "23",
+                    str(video_crf),
+                    "-threads",
+                    str(resolved_threads),
                     "-y",
                     str(first_step_output),
                 ]
@@ -515,7 +567,7 @@ class VideoExporter:
             # --- STEP 2: Add subtitles if required in a separate, safe step ---
             if needs_two_steps:
                 logger.info("Applying subtitles in a second step to avoid duplication bug.")
-                subtitle_filter = self._get_subtitle_filter(str(subtitle_file), subtitle_style)
+                subtitle_filter = self._get_subtitle_filter(str(subtitle_file), subtitle_style, custom_style)
                 cmd2 = [
                     "ffmpeg",
                     "-i",
@@ -618,13 +670,19 @@ class VideoExporter:
             logger.warning(f"Aspect ratio '{aspect_ratio}' no reconocido, manteniendo original")
             return None
 
-    def _get_subtitle_filter(self, subtitle_path: str, style: str = "default") -> str:
+    def _get_subtitle_filter(
+        self,
+        subtitle_path: str,
+        style: str = "default",
+        custom_style: Optional[Dict[str, str]] = None,
+    ) -> str:
         """
         Genero el filtro de ffmpeg para quemar subtítulos en el video
 
         Args:
             subtitle_path: Ruta al archivo SRT
-            style: Estilo de subtítulos ("default", "bold", "yellow", "tiktok")
+            style: Estilo de subtítulos ("default", "bold", "yellow", "tiktok", "__custom__")
+            custom_style: Dict with custom style properties (used when style="__custom__")
 
         Returns:
             String de filtro para ffmpeg
@@ -695,7 +753,11 @@ class VideoExporter:
             },
         }
 
-        selected_style = styles.get(style, styles["default"])
+        # Use custom_style if provided and style is "__custom__"
+        if style == "__custom__" and custom_style:
+            selected_style = custom_style
+        else:
+            selected_style = styles.get(style, styles["default"])
 
         # Construyo el filtro subtitles con el estilo
         # subtitles filter quema los subtítulos directamente en el video

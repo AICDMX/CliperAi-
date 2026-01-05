@@ -15,6 +15,10 @@ from .dependency_manager import (
     DependencyProgress,
     ensure_transcription_dependencies,
 )
+from src.config.settings_schema import (
+    build_custom_subtitle_style,
+    get_effective_subtitle_style,
+)
 
 
 EmitFn = Callable[[object], None]
@@ -323,14 +327,16 @@ class JobRunner:
 
         from src.clips_generator import ClipsGenerator
 
+        # Get clip generation settings from job settings or app settings
+        app_settings = self.state_manager.load_settings()
         generator = ClipsGenerator(
-            min_clip_duration=int(settings.get("min_seconds", 30)),
-            max_clip_duration=int(settings.get("max_seconds", 90)),
+            min_clip_duration=int(settings.get("min_seconds", app_settings.get("min_clip_duration", 30))),
+            max_clip_duration=int(settings.get("max_seconds", app_settings.get("max_clip_duration", 90))),
         )
         clips = generator.generate_clips(
             transcript_path=transcript_path,
-            min_clips=int(settings.get("min_clips", 3)),
-            max_clips=int(settings.get("max_clips", 10)),
+            min_clips=int(settings.get("min_clips", app_settings.get("min_clips", 3))),
+            max_clips=int(settings.get("max_clips", app_settings.get("max_clips", 10))),
         )
 
         if not clips:
@@ -429,25 +435,36 @@ class JobRunner:
         add_logo = bool(settings.get("add_logo", False))
         if add_logo and not resolved_logo_path:
             add_logo = False
+
+        # Build settings dict for subtitle style helpers
+        app_settings = self.state_manager.load_settings()
+        effective_style = get_effective_subtitle_style(app_settings)
+        custom_style = build_custom_subtitle_style(app_settings) if effective_style == "__custom__" else None
+
         exported_paths = exporter.export_clips(
             video_path=self._get_video_path(video_id),
             clips=clips,
-            aspect_ratio=settings.get("aspect_ratio"),
+            aspect_ratio=settings.get("aspect_ratio") or app_settings.get("default_aspect_ratio") or None,
             video_name="export",
             add_subtitles=bool(settings.get("add_subtitles", False)),
             transcript_path=state.get("transcript_path") or state.get("transcription_path"),
-            subtitle_style=str(settings.get("subtitle_style", "default")),
+            subtitle_style=effective_style,
+            custom_style=custom_style,
             organize_by_style=bool(settings.get("organize_by_style", False)),
             clip_styles=state.get("clip_styles"),
             trim_ms_start=_safe_int_setting("trim_ms_start", 0),
             trim_ms_end=_safe_int_setting("trim_ms_end", 0),
-            enable_face_tracking=bool(settings.get("enable_face_tracking", False)),
-            face_tracking_strategy=str(settings.get("face_tracking_strategy", "keep_in_frame")),
-            face_tracking_sample_rate=int(settings.get("face_tracking_sample_rate", 3)),
+            enable_face_tracking=bool(settings.get("enable_face_tracking", app_settings.get("enable_face_tracking", False))),
+            face_tracking_strategy=str(settings.get("face_tracking_strategy", app_settings.get("face_tracking_strategy", "keep_in_frame"))),
+            face_tracking_sample_rate=int(settings.get("face_tracking_sample_rate", app_settings.get("face_tracking_sample_rate", 3))),
             add_logo=add_logo,
             logo_path=(resolved_logo_path if add_logo else None),
-            logo_position=str(settings.get("logo_position", "top-right")),
-            logo_scale=float(settings.get("logo_scale", 0.1)),
+            logo_position=str(settings.get("logo_position", app_settings.get("logo_position", "top-right"))),
+            logo_scale=float(settings.get("logo_scale", app_settings.get("logo_scale", 0.1))),
+            video_crf=int(settings.get("video_crf", app_settings.get("video_crf", 23))),
+            ffmpeg_threads=int(settings.get("ffmpeg_threads", app_settings.get("ffmpeg_threads", 0))),
+            subtitle_max_chars_per_line=int(settings.get("subtitle_max_chars_per_line", app_settings.get("subtitle_max_chars_per_line", 42))),
+            subtitle_max_duration=float(settings.get("subtitle_max_duration", app_settings.get("subtitle_max_duration", 5.0))),
         )
 
         self.state_manager.mark_clips_exported(video_id, exported_paths, aspect_ratio=settings.get("aspect_ratio"))
@@ -512,25 +529,38 @@ class JobRunner:
         temp_dir.mkdir(parents=True, exist_ok=True)
         srt_path = temp_dir / f"{video_id}.srt"
 
+        # Get subtitle formatting settings from app settings
+        app_settings = self.state_manager.load_settings()
         srt_generated = SubtitleGenerator().generate_srt_from_transcript(
             transcript_path=str(transcript_path),
             output_path=str(srt_path),
+            max_chars_per_line=int(shorts_settings.get("max_chars_per_line", app_settings.get("subtitle_max_chars_per_line", 42))),
+            max_duration=float(shorts_settings.get("max_duration", app_settings.get("subtitle_max_duration", 5.0))),
         )
         if not srt_generated:
             raise RuntimeError("Failed to generate SRT from transcript")
 
         output_dir = shorts_settings.get("output_dir") or str(video_run_dir / "shorts")
         exporter = VideoExporter(output_dir=output_dir)
+
+        # Build settings dict for subtitle style helpers
+        app_settings = self.state_manager.load_settings()
+        effective_style = get_effective_subtitle_style(app_settings)
+        custom_style = build_custom_subtitle_style(app_settings) if effective_style == "__custom__" else None
+
         exported_path = exporter.export_full_video(
             video_path=input_path,
             video_name=video_id,
             output_filename=str(shorts_settings.get("output_filename") or "short.mp4"),
             srt_path=str(srt_path),
-            subtitle_style=str(shorts_settings.get("subtitle_style") or "default"),
+            subtitle_style=str(shorts_settings.get("subtitle_style") or effective_style),
+            custom_style=custom_style,
             add_logo=bool(shorts_settings.get("add_logo", True)),
-            logo_path=str(shorts_settings.get("logo_path") or "assets/logo.png"),
-            logo_position=str(shorts_settings.get("logo_position") or "top-right"),
-            logo_scale=(0.1 if shorts_settings.get("logo_scale") is None else float(shorts_settings.get("logo_scale"))),
+            logo_path=str(shorts_settings.get("logo_path") or app_settings.get("logo_path", "assets/logo.png")),
+            logo_position=str(shorts_settings.get("logo_position") or app_settings.get("logo_position", "top-right")),
+            logo_scale=(app_settings.get("logo_scale", 0.1) if shorts_settings.get("logo_scale") is None else float(shorts_settings.get("logo_scale"))),
+            video_crf=int(shorts_settings.get("video_crf", app_settings.get("video_crf", 23))),
+            ffmpeg_threads=int(shorts_settings.get("ffmpeg_threads", app_settings.get("ffmpeg_threads", 0))),
         )
 
         self.state_manager.mark_shorts_exported(video_id, exported_path, srt_path=str(srt_path), input_path=input_path)
