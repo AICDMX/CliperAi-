@@ -105,6 +105,8 @@ class VideoExporter:
         # Subtitle formatting
         subtitle_max_chars_per_line: int = 42,
         subtitle_max_duration: float = 5.0,
+        # Output structure
+        flat_output: bool = False,
     ) -> List[str]:
         """
         Exporto todos los clips de un video
@@ -128,6 +130,7 @@ class VideoExporter:
             logo_scale: Escala del logo relativa al ancho del video (0.1 = 10%).
             trim_ms_start: Milisegundos para recortar al inicio (scaffold; aún no se aplica).
             trim_ms_end: Milisegundos para recortar al final (scaffold; aún no se aplica).
+            flat_output: Si True, escribe directamente en output_dir sin crear subcarpeta.
 
         Returns:
             Lista de rutas a los clips exportados
@@ -141,9 +144,12 @@ class VideoExporter:
         if video_name is None:
             video_name = video_path.stem
 
-        # Creo una subcarpeta específica para este video
-        video_output_dir = self.output_dir / video_name
-        video_output_dir.mkdir(parents=True, exist_ok=True)
+        # Directorio de salida: plano o con subcarpeta por video
+        if flat_output:
+            video_output_dir = self.output_dir
+        else:
+            video_output_dir = self.output_dir / video_name
+            video_output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Exportando clips a: {video_output_dir}")
 
@@ -225,11 +231,18 @@ class VideoExporter:
         logo_scale: float = 0.1,
         video_crf: int = 23,
         ffmpeg_threads: int = 0,
+        flat_output: bool = False,
+        # Trim dead space at start/end (milliseconds)
+        trim_ms_start: int = 0,
+        trim_ms_end: int = 0,
     ) -> str:
         """
         Exporto un video completo aplicando (opcionalmente) subtítulos y logo.
 
         Este flujo se usa para "shorts-only": no recorta ni genera clips.
+
+        Args:
+            flat_output: Si True, escribe directamente en output_dir sin crear subcarpeta.
         """
         video_path_p = Path(video_path)
         if not video_path_p.exists():
@@ -238,9 +251,14 @@ class VideoExporter:
         if video_name is None:
             video_name = video_path_p.stem
 
-        video_output_dir = self.output_dir / video_name
-        video_output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = video_output_dir / output_filename
+        # Directorio de salida: plano o con subcarpeta por video
+        if flat_output:
+            video_output_dir = self.output_dir
+            output_path = video_output_dir / output_filename
+        else:
+            video_output_dir = self.output_dir / video_name
+            video_output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = video_output_dir / output_filename
 
         srt_file = Path(srt_path) if srt_path else None
         has_subtitles = bool(srt_file and srt_file.exists())
@@ -252,6 +270,32 @@ class VideoExporter:
             if not resolved_logo_path:
                 logger.warning("Logo overlay requested but no valid logo file found; skipping logo.")
         has_logo = bool(add_logo and resolved_logo_path)
+
+        # Calculate trim parameters
+        trim_start_sec = trim_ms_start / 1000.0
+        trim_end_sec = trim_ms_end / 1000.0
+        trim_args: List[str] = []
+        duration_args: List[str] = []
+
+        if trim_start_sec > 0 or trim_end_sec > 0:
+            # Get video duration to calculate end time
+            video_info = self.get_video_info(str(video_path_p))
+            total_duration = video_info.get("duration", 0)
+
+            if trim_start_sec > 0:
+                trim_args = ["-ss", str(trim_start_sec)]
+                logger.info(f"Trimming {trim_start_sec:.2f}s from start")
+
+            if trim_end_sec > 0 and total_duration > 0:
+                # Calculate effective duration after both trims
+                effective_duration = total_duration - trim_start_sec - trim_end_sec
+                if effective_duration > 0:
+                    duration_args = ["-t", str(effective_duration)]
+                    logger.info(f"Trimming {trim_end_sec:.2f}s from end (duration: {effective_duration:.2f}s)")
+                else:
+                    logger.warning("Trim values would result in zero/negative duration; ignoring trim")
+                    trim_args = []
+                    duration_args = []
 
         # Use a two-step process when both logo and subtitles are enabled to avoid subtitle duplication bugs.
         needs_two_steps = has_logo and has_subtitles
@@ -268,12 +312,13 @@ class VideoExporter:
                     scale=logo_scale,
                 )
                 resolved_threads = _resolve_ffmpeg_threads(ffmpeg_threads)
-                cmd1 = [
-                    "ffmpeg",
-                    "-i",
-                    str(video_path_p),
-                    "-i",
-                    str(resolved_logo_path),
+                # Build command with trim args before -i for fast seeking
+                cmd1 = ["ffmpeg"]
+                cmd1.extend(trim_args)  # -ss before -i for fast seeking
+                cmd1.extend(["-i", str(video_path_p)])
+                cmd1.extend(["-i", str(resolved_logo_path)])
+                cmd1.extend(duration_args)  # -t after inputs
+                cmd1.extend([
                     "-filter_complex",
                     ";".join(logo_chains),
                     "-map",
@@ -293,7 +338,7 @@ class VideoExporter:
                     str(resolved_threads),
                     "-y",
                     str(temp_path_step1),
-                ]
+                ])
                 result1 = subprocess.run(cmd1, capture_output=True, text=True, check=False)
                 if result1.returncode != 0:
                     raise RuntimeError(f"Error exporting short (step 1): {result1.stderr}")
@@ -317,6 +362,10 @@ class VideoExporter:
                 return str(output_path)
 
             # Single-step path (logo only, subtitles only, or neither).
+            # Build command with trim args
+            cmd = ["ffmpeg"]
+            cmd.extend(trim_args)  # -ss before -i for fast seeking
+
             if has_logo:
                 logo_chains, logo_out = self._get_logo_overlay_filter(
                     video_stream="[0:v]",
@@ -324,22 +373,24 @@ class VideoExporter:
                     position=logo_position,
                     scale=logo_scale,
                 )
-                cmd = [
-                    "ffmpeg",
-                    "-i",
-                    str(video_path_p),
-                    "-i",
-                    str(resolved_logo_path),
+                cmd.extend(["-i", str(video_path_p)])
+                cmd.extend(["-i", str(resolved_logo_path)])
+                cmd.extend(duration_args)  # -t after inputs
+                cmd.extend([
                     "-filter_complex",
                     ";".join(logo_chains),
                     "-map",
                     logo_out,
-                ]
+                ])
             elif has_subtitles:
                 subtitle_filter = self._get_subtitle_filter(str(srt_file), subtitle_style, custom_style)
-                cmd = ["ffmpeg", "-i", str(video_path_p), "-vf", subtitle_filter, "-map", "0:v"]
+                cmd.extend(["-i", str(video_path_p)])
+                cmd.extend(duration_args)
+                cmd.extend(["-vf", subtitle_filter, "-map", "0:v"])
             else:
-                cmd = ["ffmpeg", "-i", str(video_path_p), "-map", "0:v"]
+                cmd.extend(["-i", str(video_path_p)])
+                cmd.extend(duration_args)
+                cmd.extend(["-map", "0:v"])
 
             resolved_threads = _resolve_ffmpeg_threads(ffmpeg_threads)
             cmd.extend(
@@ -399,7 +450,7 @@ class VideoExporter:
         logo_path: Optional[str] = None,
         logo_position: str = "top-right",
         logo_scale: float = 0.1,
-        # Speech-edge trimming parameters (scaffold; not applied yet)
+        # Speech-edge trimming parameters
         trim_ms_start: int = 0,
         trim_ms_end: int = 0,
         # Video quality and performance
@@ -412,6 +463,19 @@ class VideoExporter:
         clip_id = clip["clip_id"]
         start_time = clip["start_time"]
         end_time = clip["end_time"]
+
+        # Apply trim adjustments (convert ms to seconds)
+        trim_start_sec = trim_ms_start / 1000.0
+        trim_end_sec = trim_ms_end / 1000.0
+        start_time = start_time + trim_start_sec
+        end_time = end_time - trim_end_sec
+
+        # Ensure we don't create negative or zero duration clips
+        if end_time <= start_time:
+            logger.warning(f"Clip {clip_id} would have zero/negative duration after trim; skipping trim")
+            start_time = clip["start_time"]
+            end_time = clip["end_time"]
+
         duration = end_time - start_time
 
         output_filename = f"{clip_id}.mp4"

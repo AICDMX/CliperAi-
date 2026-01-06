@@ -163,6 +163,18 @@ class StateManager:
             self.settings[key] = value
         self._save_settings()
 
+    def is_first_run(self) -> bool:
+        """Check if this is the first run (wizard not completed)."""
+        return not self.get_setting("_wizard_completed", False)
+
+    def mark_wizard_completed(self) -> None:
+        """Mark the setup wizard as completed."""
+        self.set_setting("_wizard_completed", True)
+
+    def load_settings(self) -> Dict:
+        """Return the current settings dict."""
+        return dict(self.settings or {})
+
 
     def _save_state(self):
         """
@@ -208,6 +220,8 @@ class StateManager:
                 'shorts_export_path': None,
                 'shorts_srt_path': None,
                 'shorts_input_path': None,
+                # Auto-naming feature
+                'auto_generated_name': None,
                 'content_type': content_type,  # Nuevo: tipo de contenido
                 'preset': preset if preset else {},  # Nuevo: configuración
                 'last_updated': now
@@ -333,6 +347,21 @@ class StateManager:
             self.state[video_id]['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self._save_state()
 
+    def set_auto_generated_name(self, video_id: str, name: str) -> None:
+        """
+        Guarda el nombre auto-generado para un video.
+        """
+        if video_id in self.state:
+            self.state[video_id]['auto_generated_name'] = name
+            self.state[video_id]['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self._save_state()
+
+    def get_auto_generated_name(self, video_id: str) -> Optional[str]:
+        """
+        Obtiene el nombre auto-generado de un video.
+        """
+        state = self.get_video_state(video_id)
+        return state.get('auto_generated_name') if state else None
 
     def get_video_state(self, video_id: str) -> Optional[Dict]:
         """

@@ -19,6 +19,7 @@ from src.config.settings_schema import (
     build_custom_subtitle_style,
     get_effective_subtitle_style,
 )
+from src.utils.video_namer import generate_video_name
 
 
 EmitFn = Callable[[object], None]
@@ -100,21 +101,33 @@ class JobRunner:
         return (cleaned or "run")[:max_len]
 
     def _ensure_run_output_dir(self, *, job_id: str, video_ids: list[str]) -> Path:
-        input_stem = None
-        if video_ids:
-            first_video_path = self.state_manager.get_video_path(video_ids[0])
-            if first_video_path:
-                input_stem = Path(first_video_path).stem
+        """
+        Crea estructura de directorios para el job:
+        - output/.cache/{job_id}/ para archivos intermedios (transcripts, clips metadata, SRTs)
+        - output/exports/ para videos finales (estructura plana)
+        """
+        # Cache dir para archivos intermedios
+        cache_dir = (Path("output") / ".cache" / job_id).resolve()
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
-        run_name = f"{self._slugify(input_stem or 'job')}_{job_id}"
-        run_output_dir = (Path("output") / "runs" / run_name).resolve()
-        run_output_dir.mkdir(parents=True, exist_ok=True)
+        # Exports dir para videos finales
+        exports_dir = self._get_exports_dir()
 
         # Persist for UI / debugging.
-        self.state_manager.update_job_status(job_id, {"run_output_dir": str(run_output_dir)})
-        return run_output_dir
+        self.state_manager.update_job_status(job_id, {
+            "cache_dir": str(cache_dir),
+            "exports_dir": str(exports_dir),
+        })
+        return cache_dir
+
+    def _get_exports_dir(self) -> Path:
+        """Retorna el directorio de exports (output/exports/)."""
+        exports_dir = (Path("output") / "exports").resolve()
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        return exports_dir
 
     def _ensure_video_run_dir(self, *, run_output_dir: Path, video_id: str) -> Path:
+        """Crea subdirectorio de cache para un video especifico."""
         video_dir = run_output_dir / video_id
         video_dir.mkdir(parents=True, exist_ok=True)
         return video_dir
@@ -422,9 +435,28 @@ class JobRunner:
         from src.video_exporter import VideoExporter
         from src.utils.logo import DEFAULT_BUILTIN_LOGO_PATH, resolve_logo_path
 
-        video_run_dir = self._ensure_video_run_dir(run_output_dir=run_output_dir, video_id=video_id)
-        output_dir = str(settings.get("output_dir") or "").strip() or str(video_run_dir)
-        exporter = VideoExporter(output_dir=output_dir)
+        # Get auto-naming settings
+        app_settings = self.state_manager.load_settings()
+        auto_name_method = app_settings.get("auto_name_method", "filename")
+        auto_name_max_chars = int(app_settings.get("auto_name_max_chars", 40))
+        auto_name_word_count = int(app_settings.get("auto_name_word_count", 5))
+
+        # Generate video name from transcript
+        video_path = self._get_video_path(video_id)
+        transcript_path = state.get("transcript_path") or state.get("transcription_path")
+        video_name = generate_video_name(
+            transcript_path=transcript_path,
+            original_filename=Path(video_path).name,
+            method=auto_name_method,
+            max_chars=auto_name_max_chars,
+            word_count=auto_name_word_count,
+        )
+        self.state_manager.set_auto_generated_name(video_id, video_name)
+        self.emit(LogEvent(job_id=job_id, video_id=video_id, level=LogLevel.INFO, message=f"Auto-generated video name: {video_name}"))
+
+        # Use flat exports directory
+        exports_dir = self._get_exports_dir()
+        exporter = VideoExporter(output_dir=str(exports_dir))
 
         saved_logo_path = self.state_manager.get_setting("logo_path", DEFAULT_BUILTIN_LOGO_PATH)
         resolved_logo_path = resolve_logo_path(
@@ -436,18 +468,17 @@ class JobRunner:
         if add_logo and not resolved_logo_path:
             add_logo = False
 
-        # Build settings dict for subtitle style helpers
-        app_settings = self.state_manager.load_settings()
+        # Build settings dict for subtitle style helpers (app_settings already loaded above)
         effective_style = get_effective_subtitle_style(app_settings)
         custom_style = build_custom_subtitle_style(app_settings) if effective_style == "__custom__" else None
 
         exported_paths = exporter.export_clips(
-            video_path=self._get_video_path(video_id),
+            video_path=video_path,
             clips=clips,
             aspect_ratio=settings.get("aspect_ratio") or app_settings.get("default_aspect_ratio") or None,
-            video_name="export",
+            video_name=video_name,
             add_subtitles=bool(settings.get("add_subtitles", False)),
-            transcript_path=state.get("transcript_path") or state.get("transcription_path"),
+            transcript_path=transcript_path,
             subtitle_style=effective_style,
             custom_style=custom_style,
             organize_by_style=bool(settings.get("organize_by_style", False)),
@@ -465,6 +496,7 @@ class JobRunner:
             ffmpeg_threads=int(settings.get("ffmpeg_threads", app_settings.get("ffmpeg_threads", 0))),
             subtitle_max_chars_per_line=int(settings.get("subtitle_max_chars_per_line", app_settings.get("subtitle_max_chars_per_line", 42))),
             subtitle_max_duration=float(settings.get("subtitle_max_duration", app_settings.get("subtitle_max_duration", 5.0))),
+            flat_output=True,
         )
 
         self.state_manager.mark_clips_exported(video_id, exported_paths, aspect_ratio=settings.get("aspect_ratio"))
@@ -525,12 +557,29 @@ class JobRunner:
         from src.subtitle_generator import SubtitleGenerator
         from src.video_exporter import VideoExporter
 
+        # Get auto-naming settings
+        app_settings = self.state_manager.load_settings()
+        auto_name_method = app_settings.get("auto_name_method", "filename")
+        auto_name_max_chars = int(app_settings.get("auto_name_max_chars", 40))
+        auto_name_word_count = int(app_settings.get("auto_name_word_count", 5))
+
+        # Generate video name from transcript
+        video_name = generate_video_name(
+            transcript_path=transcript_path,
+            original_filename=Path(input_path).name,
+            method=auto_name_method,
+            max_chars=auto_name_max_chars,
+            word_count=auto_name_word_count,
+        )
+        self.state_manager.set_auto_generated_name(video_id, video_name)
+        self.emit(LogEvent(job_id=job_id, video_id=video_id, level=LogLevel.INFO, message=f"Auto-generated video name: {video_name}"))
+
+        # SRT goes to cache dir
         temp_dir = Path(shorts_settings.get("temp_dir") or (video_run_dir / "shorts" / "temp"))
         temp_dir.mkdir(parents=True, exist_ok=True)
         srt_path = temp_dir / f"{video_id}.srt"
 
         # Get subtitle formatting settings from app settings
-        app_settings = self.state_manager.load_settings()
         srt_generated = SubtitleGenerator().generate_srt_from_transcript(
             transcript_path=str(transcript_path),
             output_path=str(srt_path),
@@ -540,18 +589,21 @@ class JobRunner:
         if not srt_generated:
             raise RuntimeError("Failed to generate SRT from transcript")
 
-        output_dir = shorts_settings.get("output_dir") or str(video_run_dir / "shorts")
-        exporter = VideoExporter(output_dir=output_dir)
+        # Use flat exports directory
+        exports_dir = self._get_exports_dir()
+        exporter = VideoExporter(output_dir=str(exports_dir))
 
         # Build settings dict for subtitle style helpers
-        app_settings = self.state_manager.load_settings()
         effective_style = get_effective_subtitle_style(app_settings)
         custom_style = build_custom_subtitle_style(app_settings) if effective_style == "__custom__" else None
 
+        # Output filename includes video name
+        output_filename = f"{video_name}_short.mp4"
+
         exported_path = exporter.export_full_video(
             video_path=input_path,
-            video_name=video_id,
-            output_filename=str(shorts_settings.get("output_filename") or "short.mp4"),
+            video_name=video_name,
+            output_filename=output_filename,
             srt_path=str(srt_path),
             subtitle_style=str(shorts_settings.get("subtitle_style") or effective_style),
             custom_style=custom_style,
@@ -561,6 +613,10 @@ class JobRunner:
             logo_scale=(app_settings.get("logo_scale", 0.1) if shorts_settings.get("logo_scale") is None else float(shorts_settings.get("logo_scale"))),
             video_crf=int(shorts_settings.get("video_crf", app_settings.get("video_crf", 23))),
             ffmpeg_threads=int(shorts_settings.get("ffmpeg_threads", app_settings.get("ffmpeg_threads", 0))),
+            flat_output=True,
+            # Dead space trimming
+            trim_ms_start=int(shorts_settings.get("trim_ms_start", app_settings.get("trim_ms_start", 0))),
+            trim_ms_end=int(shorts_settings.get("trim_ms_end", app_settings.get("trim_ms_end", 0))),
         )
 
         self.state_manager.mark_shorts_exported(video_id, exported_path, srt_path=str(srt_path), input_path=input_path)

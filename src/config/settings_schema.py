@@ -262,11 +262,38 @@ def _normalize_ffmpeg_threads(value: int) -> int:
     return value
 
 
+# --- Output/naming normalizers ---
+
+
+def _normalize_auto_name_method(value: str) -> str:
+    """Normaliza el metodo de auto-nombrado de videos."""
+    v = value.strip().lower()
+    allowed = {"filename", "first_words", "llm_summary"}
+    if v not in allowed:
+        raise ValueError(f"Must be one of: {', '.join(sorted(allowed))}")
+    return v
+
+
+def _normalize_auto_name_word_count(value: int) -> int:
+    """Normaliza el conteo de palabras para first_words."""
+    if value < 1 or value > 15:
+        raise ValueError("Word count must be between 1 and 15")
+    return value
+
+
+def _normalize_auto_name_max_chars(value: int) -> int:
+    """Normaliza el maximo de caracteres para nombres."""
+    if value < 10 or value > 100:
+        raise ValueError("Max chars must be between 10 and 100")
+    return value
+
+
 APP_SETTING_GROUPS: Tuple[SettingGroup, ...] = (
     SettingGroup(key="branding", title="Branding", description="Logo and watermark settings."),
     SettingGroup(key="clip_generation", title="Clip Generation", description="Duration and trimming settings for clip detection."),
     SettingGroup(key="subtitles", title="Subtitles", description="Subtitle styling and formatting."),
     SettingGroup(key="export", title="Export", description="Video export quality and processing options."),
+    SettingGroup(key="output", title="Output", description="Video naming and output directory settings."),
 )
 
 
@@ -531,6 +558,37 @@ APP_SETTINGS: Tuple[SettingDefinition, ...] = (
         placeholder="3",
         help_text="Process every Nth frame (higher = faster but less smooth).",
         normalize=_normalize_sample_rate,
+    ),
+    # --- Output settings ---
+    SettingDefinition(
+        key="auto_name_method",
+        group="output",
+        label="Auto-name method:",
+        python_type=str,
+        default="filename",
+        placeholder="filename, first_words, llm_summary",
+        help_text="How to generate video names: 'filename'=original, 'first_words'=from transcript, 'llm_summary'=AI generated.",
+        normalize=_normalize_auto_name_method,
+    ),
+    SettingDefinition(
+        key="auto_name_max_chars",
+        group="output",
+        label="Max name length:",
+        python_type=int,
+        default=40,
+        placeholder="40",
+        help_text="Maximum characters in auto-generated video names.",
+        normalize=_normalize_auto_name_max_chars,
+    ),
+    SettingDefinition(
+        key="auto_name_word_count",
+        group="output",
+        label="Word count (first_words):",
+        python_type=int,
+        default=5,
+        placeholder="5",
+        help_text="Number of words to extract from transcript (only for first_words method).",
+        normalize=_normalize_auto_name_word_count,
     ),
 )
 
