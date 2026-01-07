@@ -305,15 +305,15 @@ class CustomShortsModal(ModalScreen[Optional[Dict[str, object]]]):
 
                 # Trim settings
                 with Vertical(classes="settings-group"):
-                    yield Static("Dead Space Trimming", classes="group-title")
-                    yield Static("Trim silence/dead space from clip boundaries", classes="group-desc")
-                    yield Checkbox("Enable trimming", id="enable_trim", value=False)
+                    yield Static("Speech Boundary Trimming", classes="group-title")
+                    yield Static("Trim excess silence using speech detection", classes="group-desc")
+                    yield Checkbox("Enable trimming", id="enable_trim", value=True)
                     with Vertical(classes="setting-field"):
-                        yield Static("Trim from start (milliseconds):", classes="field-label")
-                        yield Input(placeholder="0", id="trim_ms_start")
+                        yield Static("Max silence at start (ms):", classes="field-label")
+                        yield Input(placeholder="1000", id="trim_ms_start")
                     with Vertical(classes="setting-field"):
-                        yield Static("Trim from end (milliseconds):", classes="field-label")
-                        yield Input(placeholder="0", id="trim_ms_end")
+                        yield Static("Max silence at end (ms):", classes="field-label")
+                        yield Input(placeholder="1000", id="trim_ms_end")
 
             with Horizontal(classes="buttons"):
                 yield Button("Process", id="process", variant="primary")
