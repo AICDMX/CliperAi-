@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Dict, List, Optional
 
 
 DEFAULT_BUILTIN_LOGO_PATH = "assets/logo.png"
@@ -142,3 +142,43 @@ def normalize_logo_setting_value(location: str) -> str:
         return str(resolved)
     except Exception:
         return str(path)
+
+
+def list_logo_candidates(
+    *,
+    saved_logo_path: Optional[str] = None,
+    builtin_logo_path: str = DEFAULT_BUILTIN_LOGO_PATH,
+) -> List[Dict[str, str]]:
+    """
+    List valid logo options for selection UIs.
+
+    Returns a de-duplicated list of dicts:
+      - name: human-friendly label
+      - setting_value: value suitable for job/settings ("assets/..." or absolute path)
+      - resolved_path: absolute resolved path to the image file
+    """
+    resolved_seen: set[str] = set()
+    options: List[Dict[str, str]] = []
+
+    def _add(label: str, candidate: Optional[str]) -> None:
+        if not candidate:
+            return
+        resolved = _coerce_to_existing_logo_file(candidate)
+        if not resolved:
+            return
+        resolved_str = str(resolved)
+        if resolved_str in resolved_seen:
+            return
+        resolved_seen.add(resolved_str)
+
+        setting_value = normalize_logo_setting_value(candidate)
+        options.append({"name": label, "setting_value": setting_value, "resolved_path": resolved_str})
+
+    # Built-in first so it stays stable as a default option.
+    _add("Built-in", builtin_logo_path)
+
+    if saved_logo_path:
+        saved_name = Path(str(saved_logo_path)).expanduser().name or "Saved"
+        _add(f"Saved ({saved_name})", saved_logo_path)
+
+    return options

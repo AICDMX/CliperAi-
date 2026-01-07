@@ -33,6 +33,7 @@ from src.core.dependency_manager import (
     ensure_all_required,
 )
 from src.tui.setup_wizard import SetupWizardModal
+from src.utils.logo import list_logo_candidates
 
 
 class AddVideosModal(ModalScreen[Optional[Dict[str, object]]]):
@@ -134,6 +135,8 @@ class CustomShortsModal(ModalScreen[Optional[Dict[str, object]]]):
         self._state_manager = state_manager
         self._choices = choices or []
         self._choice_key_to_path: Dict[str, str] = {}
+        self._logo_key_to_path: Dict[str, Optional[str]] = {}
+        self._logo_options_count: int = 0
 
     def on_mount(self) -> None:
         # Load current settings as defaults
@@ -145,6 +148,39 @@ class CustomShortsModal(ModalScreen[Optional[Dict[str, object]]]):
         self.query_one("#logo_position", Input).value = settings.get("logo_position", "top-right")
         self.query_one("#enable_face_tracking", Checkbox).value = settings.get("enable_face_tracking", False)
         self.query_one("#face_tracking_strategy", Input).value = settings.get("face_tracking_strategy", "keep_in_frame")
+
+        # Logo candidates (built-in + saved) for optional per-run override.
+        logo_table = self.query_one("#logo_table", DataTable)
+        logo_table.cursor_type = "row"
+        try:
+            logo_table.clear(columns=True)  # type: ignore[call-arg]
+        except TypeError:
+            logo_table.clear()
+        logo_table.add_columns("Logo", "Location")
+
+        candidates = list_logo_candidates(saved_logo_path=settings.get("logo_path"))
+        self._logo_key_to_path.clear()
+        self._logo_options_count = len(candidates)
+
+        # Only show selection when there are multiple valid options.
+        logo_selection_field = self.query_one("#logo_selection_field", Vertical)
+        if self._logo_options_count > 1:
+            logo_selection_field.display = True
+            logo_table.display = True
+            logo_table.add_row("Use default (no override)", "", key="__default__")
+            for idx, opt in enumerate(candidates):
+                key = f"__logo_{idx}__"
+                self._logo_key_to_path[key] = opt["setting_value"]
+                logo_table.add_row(opt["name"], opt["setting_value"], key=key)
+            try:
+                logo_table.move_cursor(row=0, column=0, animate=False)
+            except Exception:
+                pass
+        else:
+            logo_selection_field.display = False
+            logo_table.display = False
+
+        self._sync_logo_controls()
 
         # Trim settings - enable if either value is non-zero
         trim_start = int(settings.get("trim_ms_start", 0))
@@ -158,6 +194,16 @@ class CustomShortsModal(ModalScreen[Optional[Dict[str, object]]]):
             self.query_one("#source_table", DataTable).focus()
         else:
             self.query_one("#subtitle_preset", Input).focus()
+
+    def _sync_logo_controls(self) -> None:
+        add_logo = bool(self.query_one("#add_logo", Checkbox).value)
+        self.query_one("#logo_position", Input).disabled = not add_logo
+        table = self.query_one("#logo_table", DataTable)
+        table.disabled = not add_logo
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id == "add_logo":
+            self._sync_logo_controls()
 
     def compose(self) -> ComposeResult:
         yield Static("Custom Shorts Processing", id="title")
@@ -191,6 +237,11 @@ class CustomShortsModal(ModalScreen[Optional[Dict[str, object]]]):
                 with Vertical(classes="settings-group"):
                     yield Static("Logo / Watermark", classes="group-title")
                     yield Checkbox("Add logo to video", id="add_logo", value=True)
+                    with Vertical(classes="setting-field", id="logo_selection_field"):
+                        yield Static("Logo file (this run):", classes="field-label")
+                        yield Static("Pick a logo override, or use default.", classes="help-text")
+                        table = DataTable(id="logo_table")
+                        yield table
                     with Vertical(classes="setting-field"):
                         yield Static("Logo position:", classes="field-label")
                         yield Static("Options: top-right, top-left, bottom-right, bottom-left", classes="help-text")
@@ -221,6 +272,19 @@ class CustomShortsModal(ModalScreen[Optional[Dict[str, object]]]):
                 yield Button("Process", id="process", variant="primary")
                 yield Button("Cancel", id="cancel")
 
+    def _get_selected_row_key_value(self, table: DataTable) -> Optional[str]:
+        key = None
+        if table.cursor_row is not None:
+            if hasattr(table, "get_row_key"):
+                key = table.get_row_key(table.cursor_row)  # type: ignore[attr-defined]
+            else:
+                try:
+                    key = list(getattr(table, "rows", {}).keys())[int(table.cursor_row)]
+                except Exception:
+                    key = None
+        value = getattr(key, "value", None) if key is not None else None
+        return str(value) if value is not None else None
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
             self.dismiss(None)
@@ -233,17 +297,7 @@ class CustomShortsModal(ModalScreen[Optional[Dict[str, object]]]):
             # Get source selection
             if self._choices:
                 table = self.query_one("#source_table", DataTable)
-                key = None
-                if table.cursor_row is not None:
-                    if hasattr(table, "get_row_key"):
-                        key = table.get_row_key(table.cursor_row)
-                    else:
-                        try:
-                            key = list(getattr(table, "rows", {}).keys())[int(table.cursor_row)]
-                        except Exception:
-                            key = None
-                value = getattr(key, "value", None) if key is not None else None
-                selected_key = str(value) if value is not None else "__full__"
+                selected_key = self._get_selected_row_key_value(table) or "__full__"
                 if selected_key != "__full__":
                     result["input_path"] = self._choice_key_to_path.get(selected_key)
 
@@ -253,7 +307,15 @@ class CustomShortsModal(ModalScreen[Optional[Dict[str, object]]]):
                 result["subtitle_style"] = subtitle_preset
 
             # Logo settings
-            result["add_logo"] = self.query_one("#add_logo", Checkbox).value
+            add_logo = bool(self.query_one("#add_logo", Checkbox).value)
+            result["add_logo"] = add_logo
+            if add_logo and self.query_one("#logo_table", DataTable).display and self._logo_options_count > 1:
+                logo_table = self.query_one("#logo_table", DataTable)
+                selected_logo_key = self._get_selected_row_key_value(logo_table) or "__default__"
+                if selected_logo_key != "__default__":
+                    selected_path = self._logo_key_to_path.get(selected_logo_key)
+                    if selected_path:
+                        result["logo_path"] = str(selected_path)
             logo_position = self.query_one("#logo_position", Input).value.strip().lower()
             if logo_position in {"top-right", "top-left", "bottom-right", "bottom-left"}:
                 result["logo_position"] = logo_position
@@ -1179,6 +1241,8 @@ class CliperTUI(App):
 
         # Logo settings
         shorts_settings["add_logo"] = result.get("add_logo", True)
+        if shorts_settings.get("add_logo") and result.get("logo_path"):
+            shorts_settings["logo_path"] = str(result["logo_path"])
         if result.get("logo_position"):
             shorts_settings["logo_position"] = result["logo_position"]
 

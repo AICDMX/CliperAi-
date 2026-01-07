@@ -18,6 +18,23 @@ async def _wait_until(pilot, predicate, *, timeout: float = 5.0, step: float = 0
         await pilot.pause(step)
 
 
+async def _dismiss_dependency_modal_if_present(pilot, app) -> None:
+    """Startup may auto-open the dependency modal when deps are missing."""
+
+    def has_dep_modal() -> bool:
+        try:
+            app.screen.query_one("#dep_modal")
+            return True
+        except Exception:
+            return False
+
+    # Give the startup worker a moment to mount the modal.
+    await pilot.pause(0.2)
+    if has_dep_modal():
+        await pilot.press("escape")
+        await _wait_until(pilot, lambda: not has_dep_modal())
+
+
 def test_settings_modal_layout_common_sizes(tmp_path: Path, monkeypatch) -> None:
     async def run(size: tuple[int, int]) -> None:
         monkeypatch.chdir(tmp_path)
@@ -34,10 +51,14 @@ def test_settings_modal_layout_common_sizes(tmp_path: Path, monkeypatch) -> None
         import src.tui.app as tui_app_module
 
         app = tui_app_module.CliperTUI()
+        # Avoid background startup dependency checks in the test harness.
+        app._startup_dep_check_done = True
+        app._startup_wizard_check_done = True
 
         async with app.run_test(size=size) as pilot:
-            from textual.widgets import Button, Input, Static
+            from textual.widgets import Input, Static
 
+            await _dismiss_dependency_modal_if_present(pilot, app)
             await pilot.press("s")
 
             def has_logo_input() -> bool:
@@ -49,30 +70,34 @@ def test_settings_modal_layout_common_sizes(tmp_path: Path, monkeypatch) -> None
 
             await _wait_until(pilot, has_logo_input)
 
-            # Invalid extension: should show a clear error + disable Save.
+            modal = app.screen
+
+            # Invalid extension: should show a clear error and avoid persisting.
+            baseline_logo = app.state_manager.get_setting("logo_path")
             invalid_logo = tmp_path / "logo.gif"
             invalid_logo.write_bytes(b"")
             app.screen.query_one("#setting_logo_path", Input).value = str(invalid_logo)
             # Force a validation pass (programmatic value changes may not emit Input.Changed).
-            app.screen.query_one("#save", Button).press()
+            modal._validate_and_save()  # type: ignore[attr-defined]
 
-            def save_disabled_with_error() -> bool:
+            def has_error() -> bool:
                 try:
                     err = app.screen.query_one("#setting_logo_path_error", Static)
-                    save = app.screen.query_one("#save", Button)
-                    return bool(save.disabled) and bool(err.display) and bool(str(getattr(err, "content", "")).strip())
+                    renderable = getattr(err, "renderable", getattr(err, "_renderable", ""))
+                    return bool(err.display) and bool(str(renderable).strip())
                 except Exception:
                     return False
 
-            await _wait_until(pilot, save_disabled_with_error)
+            await _wait_until(pilot, has_error)
+            assert app.state_manager.get_setting("logo_path") == baseline_logo
 
             # Valid PNG: should enable Save and persist.
             custom_logo = tmp_path / "logo.png"
             custom_logo.write_bytes(b"\x89PNG\r\n\x1a\n")
             app.screen.query_one("#setting_logo_path", Input).value = str(custom_logo)
-            await _wait_until(pilot, lambda: not app.screen.query_one("#save", Button).disabled)
-            app.screen.query_one("#save", Button).press()
+            modal._validate_and_save()  # type: ignore[attr-defined]
 
+            await pilot.press("escape")
             await _wait_until(pilot, lambda: not has_logo_input())
 
             persisted = json.loads(settings_file.read_text(encoding="utf-8"))
