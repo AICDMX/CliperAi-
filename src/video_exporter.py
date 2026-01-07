@@ -9,6 +9,7 @@ Usa ffmpeg para cortar con precisión y opcionalmente cambiar aspect ratio.
 import json
 import os
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional
 from rich.console import Console
@@ -17,8 +18,34 @@ from rich.progress import Progress, TaskID
 from src.utils.logger import get_logger
 from src.subtitle_generator import SubtitleGenerator
 from src.reframer import FaceReframer
+from src.speech_edge_clip import compute_speech_aware_boundaries
 
 logger = get_logger(__name__)
+
+def _safe_parse_ffprobe_r_frame_rate(r_frame_rate: object) -> float:
+    """
+    Safely parse ffprobe's `r_frame_rate` field into a numeric FPS value.
+
+    Expected formats include strings like "30/1" or "30000/1001".
+    Returns 0.0 if the value is missing or invalid.
+    """
+    if r_frame_rate is None:
+        return 0.0
+    if isinstance(r_frame_rate, (int, float)):
+        return float(r_frame_rate)
+    if not isinstance(r_frame_rate, str):
+        return 0.0
+
+    value = r_frame_rate.strip()
+    if not value:
+        return 0.0
+
+    try:
+        fps = float(Fraction(value))
+    except Exception:
+        return 0.0
+
+    return fps if fps > 0 else 0.0
 
 
 def _resolve_ffmpeg_threads(threads: int) -> int:
@@ -96,7 +123,7 @@ class VideoExporter:
         logo_path: Optional[str] = None,
         logo_position: str = "top-right",
         logo_scale: float = 0.1,
-        # Speech-edge trimming parameters (scaffold; not applied yet)
+        # Speech-aware trimming: maximum silence buffer at start/end (milliseconds)
         trim_ms_start: int = 0,
         trim_ms_end: int = 0,
         # Video quality and performance
@@ -128,8 +155,8 @@ class VideoExporter:
             logo_path: Ruta al archivo del logo (solo .png/.jpg/.jpeg).
             logo_position: Posición del logo ("top-right", "top-left", "bottom-right", "bottom-left").
             logo_scale: Escala del logo relativa al ancho del video (0.1 = 10%).
-            trim_ms_start: Milisegundos para recortar al inicio (scaffold; aún no se aplica).
-            trim_ms_end: Milisegundos para recortar al final (scaffold; aún no se aplica).
+            trim_ms_start: Máximo silencio (ms) a conservar antes del habla (requiere transcript_path).
+            trim_ms_end: Máximo silencio (ms) a conservar después del habla (requiere transcript_path).
             flat_output: Si True, escribe directamente en output_dir sin crear subcarpeta.
 
         Returns:
@@ -223,6 +250,7 @@ class VideoExporter:
         video_name: Optional[str] = None,
         output_filename: str = "short.mp4",
         srt_path: Optional[str] = None,
+        transcript_path: Optional[str] = None,
         subtitle_style: str = "default",
         custom_style: Optional[Dict[str, str]] = None,
         add_logo: bool = False,
@@ -231,15 +259,18 @@ class VideoExporter:
         logo_scale: float = 0.1,
         video_crf: int = 23,
         ffmpeg_threads: int = 0,
+        subtitle_max_chars_per_line: int = 42,
+        subtitle_max_duration: float = 5.0,
         flat_output: bool = False,
-        # Trim dead space at start/end (milliseconds)
+        # Speech-aware trimming: maximum silence buffer at start/end (milliseconds)
         trim_ms_start: int = 0,
         trim_ms_end: int = 0,
     ) -> str:
         """
         Exporto un video completo aplicando (opcionalmente) subtítulos y logo.
 
-        Este flujo se usa para "shorts-only": no recorta ni genera clips.
+        Este flujo se usa para "shorts-only": exporta un único archivo (opcionalmente
+        con subtítulos/logo) y puede aplicar recorte "speech-aware" si hay transcript.
 
         Args:
             flat_output: Si True, escribe directamente en output_dir sin crear subcarpeta.
@@ -271,31 +302,68 @@ class VideoExporter:
                 logger.warning("Logo overlay requested but no valid logo file found; skipping logo.")
         has_logo = bool(add_logo and resolved_logo_path)
 
-        # Calculate trim parameters
-        trim_start_sec = trim_ms_start / 1000.0
-        trim_end_sec = trim_ms_end / 1000.0
+        # Calculate trim parameters (speech-aware)
         trim_args: List[str] = []
         duration_args: List[str] = []
+        temp_srt_path: Optional[Path] = None
 
-        if trim_start_sec > 0 or trim_end_sec > 0:
-            # Get video duration to calculate end time
+        trim_window_start = 0.0
+        trim_window_end: Optional[float] = None
+        total_duration: Optional[float] = None
+
+        if transcript_path and (trim_ms_start > 0 or trim_ms_end > 0):
+            # Get video duration to define the window end.
             video_info = self.get_video_info(str(video_path_p))
-            total_duration = video_info.get("duration", 0)
+            total_duration = float(video_info.get("duration", 0) or 0)
+            if total_duration and total_duration > 0:
+                candidate_start, candidate_end = compute_speech_aware_boundaries(
+                    transcript_path=transcript_path,
+                    clip_start=0.0,
+                    clip_end=total_duration,
+                    trim_ms_start=trim_ms_start,
+                    trim_ms_end=trim_ms_end,
+                )
+                if candidate_end > candidate_start:
+                    if candidate_start > 0 or candidate_end < total_duration:
+                        trim_window_start, trim_window_end = candidate_start, candidate_end
+                        logger.info(
+                            f"Speech-aware trim for full video: "
+                            f"0.000-{total_duration:.3f} -> {trim_window_start:.3f}-{trim_window_end:.3f}"
+                        )
 
-            if trim_start_sec > 0:
-                trim_args = ["-ss", str(trim_start_sec)]
-                logger.info(f"Trimming {trim_start_sec:.2f}s from start")
+        if trim_window_end is not None:
+            if trim_window_start > 0:
+                trim_args = ["-ss", str(trim_window_start)]
+            effective_duration = trim_window_end - trim_window_start
+            if effective_duration > 0:
+                duration_args = ["-t", str(effective_duration)]
+            else:
+                trim_args = []
+                duration_args = []
+                trim_window_start = 0.0
+                trim_window_end = None
 
-            if trim_end_sec > 0 and total_duration > 0:
-                # Calculate effective duration after both trims
-                effective_duration = total_duration - trim_start_sec - trim_end_sec
-                if effective_duration > 0:
-                    duration_args = ["-t", str(effective_duration)]
-                    logger.info(f"Trimming {trim_end_sec:.2f}s from end (duration: {effective_duration:.2f}s)")
-                else:
-                    logger.warning("Trim values would result in zero/negative duration; ignoring trim")
-                    trim_args = []
-                    duration_args = []
+        # If we trimmed the start/end and subtitles are enabled, regenerate SRT for the trimmed window
+        # so subtitles remain clip-relative to the exported output.
+        if (
+            has_subtitles
+            and transcript_path
+            and trim_window_end is not None
+        ):
+            temp_srt_path = video_output_dir / f"{output_path.stem}_trimmed.srt"
+            generated = self.subtitle_generator.generate_srt_for_clip(
+                transcript_path=transcript_path,
+                clip_start=trim_window_start,
+                clip_end=float(trim_window_end),
+                output_path=str(temp_srt_path),
+                max_chars_per_line=subtitle_max_chars_per_line,
+                max_duration=subtitle_max_duration,
+            )
+            if generated and temp_srt_path.exists():
+                srt_file = temp_srt_path
+                has_subtitles = True
+            else:
+                logger.warning("Failed to regenerate trimmed SRT; subtitles may be desynced if trimming occurred.")
 
         # Use a two-step process when both logo and subtitles are enabled to avoid subtitle duplication bugs.
         needs_two_steps = has_logo and has_subtitles
@@ -422,6 +490,8 @@ class VideoExporter:
         finally:
             if temp_path_step1.exists():
                 temp_path_step1.unlink()
+            if temp_srt_path and temp_srt_path.exists():
+                temp_srt_path.unlink()
 
     def _escape_ffmpeg_filter_path(self, path: str) -> str:
         """
@@ -461,20 +531,30 @@ class VideoExporter:
         subtitle_max_duration: float = 5.0,
     ) -> Optional[Path]:
         clip_id = clip["clip_id"]
-        start_time = clip["start_time"]
-        end_time = clip["end_time"]
+        start_time = float(clip["start_time"])
+        end_time = float(clip["end_time"])
 
-        # Apply trim adjustments (convert ms to seconds)
-        trim_start_sec = trim_ms_start / 1000.0
-        trim_end_sec = trim_ms_end / 1000.0
-        start_time = start_time + trim_start_sec
-        end_time = end_time - trim_end_sec
+        # Speech-aware trimming: keep up to N ms of silence around speech edges.
+        if transcript_path and (trim_ms_start > 0 or trim_ms_end > 0):
+            new_start, new_end = compute_speech_aware_boundaries(
+                transcript_path=transcript_path,
+                clip_start=start_time,
+                clip_end=end_time,
+                trim_ms_start=trim_ms_start,
+                trim_ms_end=trim_ms_end,
+            )
+            if new_start != start_time or new_end != end_time:
+                logger.info(
+                    f"Speech-aware trim for clip {clip_id}: "
+                    f"{start_time:.3f}-{end_time:.3f} -> {new_start:.3f}-{new_end:.3f}"
+                )
+            start_time, end_time = new_start, new_end
 
-        # Ensure we don't create negative or zero duration clips
+        # Safety: Ensure we don't create negative or zero duration clips
         if end_time <= start_time:
-            logger.warning(f"Clip {clip_id} would have zero/negative duration after trim; skipping trim")
-            start_time = clip["start_time"]
-            end_time = clip["end_time"]
+            logger.warning(f"Clip {clip_id} would have zero/negative duration after trim; keeping original window")
+            start_time = float(clip["start_time"])
+            end_time = float(clip["end_time"])
 
         duration = end_time - start_time
 
@@ -881,7 +961,7 @@ class VideoExporter:
                 "duration": float(data["format"].get("duration", 0)),
                 "width": video_stream.get("width"),
                 "height": video_stream.get("height"),
-                "fps": eval(video_stream.get("r_frame_rate", "0/1")),  # "30/1" → 30.0
+                "fps": _safe_parse_ffprobe_r_frame_rate(video_stream.get("r_frame_rate")),
                 "codec": video_stream.get("codec_name"),
             }
 

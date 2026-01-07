@@ -580,11 +580,13 @@ class JobRunner:
         srt_path = temp_dir / f"{video_id}.srt"
 
         # Get subtitle formatting settings from app settings
+        subtitle_max_chars_per_line = int(shorts_settings.get("max_chars_per_line", app_settings.get("subtitle_max_chars_per_line", 42)))
+        subtitle_max_duration = float(shorts_settings.get("max_duration", app_settings.get("subtitle_max_duration", 5.0)))
         srt_generated = SubtitleGenerator().generate_srt_from_transcript(
             transcript_path=str(transcript_path),
             output_path=str(srt_path),
-            max_chars_per_line=int(shorts_settings.get("max_chars_per_line", app_settings.get("subtitle_max_chars_per_line", 42))),
-            max_duration=float(shorts_settings.get("max_duration", app_settings.get("subtitle_max_duration", 5.0))),
+            max_chars_per_line=subtitle_max_chars_per_line,
+            max_duration=subtitle_max_duration,
         )
         if not srt_generated:
             raise RuntimeError("Failed to generate SRT from transcript")
@@ -605,6 +607,7 @@ class JobRunner:
             video_name=video_name,
             output_filename=output_filename,
             srt_path=str(srt_path),
+            transcript_path=str(transcript_path),
             subtitle_style=str(shorts_settings.get("subtitle_style") or effective_style),
             custom_style=custom_style,
             add_logo=bool(shorts_settings.get("add_logo", True)),
@@ -613,6 +616,8 @@ class JobRunner:
             logo_scale=(app_settings.get("logo_scale", 0.1) if shorts_settings.get("logo_scale") is None else float(shorts_settings.get("logo_scale"))),
             video_crf=int(shorts_settings.get("video_crf", app_settings.get("video_crf", 23))),
             ffmpeg_threads=int(shorts_settings.get("ffmpeg_threads", app_settings.get("ffmpeg_threads", 0))),
+            subtitle_max_chars_per_line=subtitle_max_chars_per_line,
+            subtitle_max_duration=subtitle_max_duration,
             flat_output=True,
             # Dead space trimming
             trim_ms_start=int(shorts_settings.get("trim_ms_start", app_settings.get("trim_ms_start", 0))),
