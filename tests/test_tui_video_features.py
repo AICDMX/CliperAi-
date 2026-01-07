@@ -51,6 +51,22 @@ async def _wait_until(pilot, predicate, *, timeout: float = 5.0, step: float = 0
         await pilot.pause(step)
 
 
+async def _dismiss_dependency_modal_if_present(pilot, app) -> None:
+    """Startup may auto-open the dependency modal when deps are missing."""
+
+    def has_dep_modal() -> bool:
+        try:
+            app.screen.query_one("#dep_modal")
+            return True
+        except Exception:
+            return False
+
+    await pilot.pause(0.2)
+    if has_dep_modal():
+        await pilot.press("escape")
+        await _wait_until(pilot, lambda: not has_dep_modal())
+
+
 def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
     async def run() -> None:
         # Isolate all state in a temporary project directory.
@@ -145,6 +161,9 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(tui_app_module, "JobRunner", FakeJobRunner)
 
         app = tui_app_module.CliperTUI()
+        # Avoid background startup dependency checks in the test harness.
+        app._startup_dep_check_done = True
+        app._startup_wizard_check_done = True
 
         async with app.run_test(size=(120, 40)) as pilot:
             # Start from a known settings baseline.
@@ -152,6 +171,7 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
             app.state_manager.set_setting("logo_path", DEFAULT_BUILTIN_LOGO_PATH)
 
             # Settings entrypoint (hotkey) + Save persists.
+            await _dismiss_dependency_modal_if_present(pilot, app)
             await pilot.press("s")
 
             from textual.widgets import Button, DataTable, Input, RichLog, Static
@@ -165,48 +185,53 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
 
             await _wait_until(pilot, has_settings_logo_input)
 
-            # Invalid logo paths should show a clear error and disable Save.
+            modal = app.screen
+
+            # Invalid logo paths should show a clear error and avoid persisting.
+            baseline_logo = app.state_manager.get_setting("logo_path", DEFAULT_BUILTIN_LOGO_PATH)
             invalid_logo = tmp_path / "custom_logo.gif"
             invalid_logo.write_bytes(b"")
             app.screen.query_one("#setting_logo_path", Input).value = str(invalid_logo)
             # Force a validation pass (programmatic value changes may not emit Input.Changed).
-            app.screen.query_one("#save", Button).press()
+            modal._validate_and_save()  # type: ignore[attr-defined]
 
-            def save_disabled_with_logo_error() -> bool:
+            def has_logo_error() -> bool:
                 try:
                     err = app.screen.query_one("#setting_logo_path_error", Static)
-                    save = app.screen.query_one("#save", Button)
-                    return bool(save.disabled) and bool(err.display) and bool(str(getattr(err, "content", "")).strip())
+                    renderable = getattr(err, "renderable", getattr(err, "_renderable", ""))
+                    return bool(err.display) and bool(str(renderable).strip())
                 except Exception:
                     return False
 
-            await _wait_until(pilot, save_disabled_with_logo_error)
+            await _wait_until(pilot, has_logo_error)
+            assert app.state_manager.get_setting("logo_path", DEFAULT_BUILTIN_LOGO_PATH) == baseline_logo
 
             custom_logo = tmp_path / "custom_logo.png"
             custom_logo.write_bytes(b"\x89PNG\r\n\x1a\n")
             app.screen.query_one("#setting_logo_path", Input).value = str(custom_logo)
+            modal._validate_and_save()  # type: ignore[attr-defined]
 
-            await _wait_until(pilot, lambda: not app.screen.query_one("#save", Button).disabled)
-            app.screen.query_one("#save", Button).press()
-
+            await pilot.press("escape")
             await _wait_until(pilot, lambda: not has_settings_logo_input())
             assert app.state_manager.get_setting("logo_path") == str(custom_logo)
             persisted = json.loads(settings_file.read_text(encoding="utf-8"))
             assert persisted.get("logo_path") == str(custom_logo)
 
-            # Settings entrypoint (button) + Cancel does not persist.
+            # Settings entrypoint (button) persists valid updates.
             app.screen.query_one("#settings", Button).press()
             await _wait_until(pilot, has_settings_logo_input)
+            modal = app.screen
 
             other_logo = tmp_path / "other_logo.png"
             other_logo.write_bytes(b"\x89PNG\r\n\x1a\n")
             app.screen.query_one("#setting_logo_path", Input).value = str(other_logo)
-            app.screen.query_one("#cancel", Button).press()
+            modal._validate_and_save()  # type: ignore[attr-defined]
+            await pilot.press("escape")
 
             await _wait_until(pilot, lambda: not has_settings_logo_input())
-            assert app.state_manager.get_setting("logo_path") == str(custom_logo)
+            assert app.state_manager.get_setting("logo_path") == str(other_logo)
             persisted = json.loads(settings_file.read_text(encoding="utf-8"))
-            assert persisted.get("logo_path") == str(custom_logo)
+            assert persisted.get("logo_path") == str(other_logo)
 
             # Repro reported crash path: `a` to add videos should not throw.
             await pilot.press("a")
@@ -307,5 +332,154 @@ def test_tui_video_features_single_video(tmp_path: Path, monkeypatch) -> None:
 
             # Quit workflow
             await pilot.press("q")
+
+    asyncio.run(run())
+
+
+def test_tui_shift_p_logo_selection(tmp_path: Path, monkeypatch) -> None:
+    async def run() -> None:
+        monkeypatch.chdir(tmp_path)
+
+        import src.utils.state_manager as state_manager_module
+
+        state_manager_module._state_manager_instance = None
+        settings_file = tmp_path / "config" / "app_settings.json"
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        settings_file.write_text(json.dumps({"_wizard_completed": True}), encoding="utf-8")
+        state_manager_module._state_manager_init_kwargs = {"app_root": tmp_path, "settings_file": settings_file}
+
+        from src.core.events import LogEvent, LogLevel
+        from src.core.models import JobStatus, JobStep
+        import src.tui.app as tui_app_module
+
+        class FakeJobRunner:
+            def __init__(self, state_manager, emit):
+                self.state_manager = state_manager
+                self.emit = emit
+
+            def run_job(self, spec):
+                status = JobStatus(progress_current=0, progress_total=max(1, len(spec.video_ids) * len(spec.steps)))
+                status.mark_started()
+                for _video_id in spec.video_ids:
+                    for _step in spec.steps:
+                        status.progress_current += 1
+                status.mark_finished_ok()
+                self.emit(LogEvent(job_id=spec.job_id, level=LogLevel.INFO, message="Fake job completed"))
+                return status
+
+        monkeypatch.setattr(tui_app_module, "JobRunner", FakeJobRunner)
+
+        app = tui_app_module.CliperTUI()
+        # Avoid background startup dependency checks in the test harness.
+        app._startup_dep_check_done = True
+        app._startup_wizard_check_done = True
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            from textual.widgets import Button, DataTable, Input
+
+            def move_table_cursor_to_row(table: DataTable, row: int) -> None:
+                try:
+                    table.move_cursor(row=row, column=0, animate=False)
+                    return
+                except TypeError:
+                    try:
+                        table.move_cursor(row=row, column=0)
+                        return
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                try:
+                    table.cursor_coordinate = (row, 0)  # type: ignore[attr-defined]
+                    return
+                except Exception:
+                    pass
+
+                try:
+                    table.cursor_row = row  # type: ignore[assignment]
+                except Exception:
+                    pass
+
+            # Keep this test self-contained without requiring ffmpeg.
+            fixture_path = tmp_path / "video.mp4"
+            fixture_path.write_bytes(b"")
+            video_id = fixture_path.stem
+
+            # Ensure multiple valid logo options exist (built-in + saved).
+            custom_logo = tmp_path / "saved_logo.png"
+            custom_logo.write_bytes(b"\x89PNG\r\n\x1a\n")
+            app.state_manager.set_setting("logo_path", str(custom_logo))
+
+            # Add & select the video.
+            await _dismiss_dependency_modal_if_present(pilot, app)
+            await pilot.press("a")
+
+            def has_paths_input() -> bool:
+                try:
+                    app.screen.query_one("#paths", Input)
+                    return True
+                except Exception:
+                    return False
+
+            await _wait_until(pilot, has_paths_input)
+            paths_input = app.screen.query_one("#paths", Input)
+            if hasattr(pilot, "type"):
+                await pilot.type(str(fixture_path))
+            else:
+                paths_input.value = str(fixture_path)
+            app.screen.query_one("#add", Button).press()
+            await _wait_until(pilot, lambda: not has_paths_input())
+
+            library = app.screen.query_one("#library", DataTable)
+            await _wait_until(pilot, lambda: library.row_count == 1)
+
+            await pilot.press("space")
+            await _wait_until(pilot, lambda: len(app.selected_video_ids) == 1)
+            assert video_id in app.selected_video_ids
+
+            # Shift+P: choose built-in logo override for this run.
+            await pilot.press("P")
+
+            def has_custom_shorts_modal() -> bool:
+                try:
+                    app.screen.query_one("#custom_shorts_modal")
+                    return True
+                except Exception:
+                    return False
+
+            await _wait_until(pilot, has_custom_shorts_modal)
+
+            logo_table = app.screen.query_one("#logo_table", DataTable)
+            assert bool(getattr(logo_table, "display", True))
+            move_table_cursor_to_row(logo_table, 1)  # "Built-in" option (row 0 is "Use default")
+            app.screen.query_one("#process", Button).press()
+            await _wait_until(pilot, lambda: not has_custom_shorts_modal())
+
+            await _wait_until(
+                pilot,
+                lambda: list(app.state_manager.list_jobs().values())[-1].get("status", {}).get("state") == "succeeded",
+            )
+            jobs = list(app.state_manager.list_jobs().values())
+            assert len(jobs) == 1
+            spec_settings = (jobs[-1].get("spec") or {}).get("settings") or {}
+            assert (spec_settings.get("shorts") or {}).get("logo_path") == "assets/logo.png"
+
+            # Shift+P again: keep "Use default" selected -> no override in job settings.
+            await pilot.press("P")
+            await _wait_until(pilot, has_custom_shorts_modal)
+            logo_table = app.screen.query_one("#logo_table", DataTable)
+            move_table_cursor_to_row(logo_table, 0)
+            app.screen.query_one("#process", Button).press()
+            await _wait_until(pilot, lambda: not has_custom_shorts_modal())
+
+            await _wait_until(
+                pilot,
+                lambda: list(app.state_manager.list_jobs().values())[-1].get("status", {}).get("state") == "succeeded",
+            )
+            jobs = list(app.state_manager.list_jobs().values())
+            assert len(jobs) == 2
+            spec_settings = (jobs[-1].get("spec") or {}).get("settings") or {}
+            assert "logo_path" not in (spec_settings.get("shorts") or {})
 
     asyncio.run(run())
