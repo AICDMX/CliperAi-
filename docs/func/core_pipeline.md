@@ -1,18 +1,17 @@
 # Core Pipeline Functions
 
 ### Main Entry Point
-**File:** `cliper.py`
+**File:** `src/tui/app.py`
 
-**Function:** `main()`
-- **Purpose:** Main CLI loop orchestrating all operations
-- **Inputs:** None (reads from CLI)
-- **Outputs:** None (interactive menu)
-- **Dependencies:** All modules below
+The Textual TUI provides an interactive interface for orchestrating all pipeline operations.
 
-**Function:** `escanear_videos() -> List[Dict[str, str]]`
+### Video Registry
+**File:** `src/utils/video_registry.py`
+
+**Function:** `scan_videos() -> List[Dict[str, str]]`
 - **Purpose:** Scans `downloads/` folder for MP4 videos
 - **Inputs:** None
-- **Outputs:** 
+- **Outputs:**
   ```python
   [
     {

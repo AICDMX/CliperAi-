@@ -67,7 +67,7 @@ This document outlines planned enhancements for CLIPER v2. All v1 functionality 
 
 **Example Usage:**
 ```bash
-python cliper.py \
+uv run python src/tui/app.py \
   --input video.mp4 \
   --content-type podcast \
   --aspect-ratio 9:16 \
@@ -97,7 +97,7 @@ python cliper.py \
 
 **Example Workflow:**
 ```bash
-python cliper.py --batch \
+uv run python src/tui/app.py --batch \
   --input-dir path/to/videos \
   --content-type tutorial \
   --aspect-ratio 9:16 \

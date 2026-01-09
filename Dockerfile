@@ -34,4 +34,4 @@ COPY . .
 
 # Define the command to run your application
 # This will be the default command when the container starts
-CMD ["uv", "run", "cliper.py"]
+CMD ["uv", "run", "python", "src/tui/app.py"]

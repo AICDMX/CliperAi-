@@ -13,12 +13,9 @@ This project uses **uv** as the package manager. All Python commands should be r
 ### Running the Application
 
 ```bash
-# TUI interface (recommended)
+# TUI interface
 uv run python src/tui/app.py
 make tui
-
-# Legacy CLI
-uv run cliper.py
 
 # Interactive setup
 python setup.py

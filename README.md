@@ -36,14 +36,8 @@ python setup.py --output=.env.demo
 
 ### 3. Run CLIPER
 
-**Textual TUI (Recommended):**
 ```bash
-uv run -m src.tui.app
-```
-
-**Legacy CLI (prompt-loop):**
-```bash
-uv run cliper.py
+uv run python src/tui/app.py
 ```
 
 ---
