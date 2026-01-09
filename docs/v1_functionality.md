@@ -29,7 +29,7 @@ This document catalogs all main functionality functions in CLIPER to facilitate 
 ## Quick Reference
 
 ### Main Entry Points
-- **CLI:** `cliper.py` → `main()` - Interactive menu system
+- **TUI:** `src/tui/app.py` - Textual TUI interface
 - **Video Download:** `src/downloader.py` → `YoutubeDownloader`
 - **Transcription:** `src/transcriber.py` → `Transcriber`
 - **Clip Generation:** `src/clips_generator.py` → `ClipsGenerator`

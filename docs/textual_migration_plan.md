@@ -2,7 +2,7 @@
 
 ## Goals
 
-- Replace the current prompt-loop CLI (`cliper.py`) with a real TUI built on Textual.
+- Maintain the TUI built on Textual (`src/tui/app.py`) as the primary interface.
 - Keep the pipeline logic (download → transcribe → clip detect → export) UI-agnostic.
 - Introduce a job/queue model that can be reused later by a desktop GUI (Qt) or a web GUI.
 - Preserve existing state (`temp/project_state.json`) and outputs (`output/`, `temp/`).
@@ -90,11 +90,10 @@ Textual can either call the core directly (simpler) or call the API (more future
 
 ## Implementation Plan (Milestones)
 
-### Milestone 0: Prep (small refactor, no UX change)
+### Milestone 0: Prep (small refactor, no UX change) - COMPLETED
 
-- Extract “input parsing + video registry” utilities from `cliper.py` into a reusable module:
-  - e.g. `src/utils/video_registry.py` (or `src/core/library.py`)
-- Ensure the core functions can be called without Rich prompts.
+- Extracted "input parsing + video registry" utilities into `src/utils/video_registry.py`
+- Core functions can be called without Rich prompts.
 - Standardize settings objects for:
   - transcription settings (model, language, skip_done)
   - clip settings (min/max seconds, max_clips, skip_done)
@@ -165,13 +164,11 @@ Recommended approach:
 - **Dependency footprint:** Textual adds a dependency; keep CLI as fallback initially.
 - **OS-specific file pickers:** Textual doesn’t provide native pickers; use path input + directory scanning (like now).
 
-## Suggested Repo Changes
+## Suggested Repo Changes - COMPLETED
 
-- Add Textual as a dependency (likely in `pyproject.toml`):
-  - `textual>=0.80` (version can be adjusted)
-- Add a new entry point:
-  - `python -m src.tui.app`
-- Keep `cliper.py` for now as “legacy CLI” until Textual reaches parity.
+- Textual added as a dependency in `pyproject.toml`
+- Entry point: `uv run python src/tui/app.py`
+- Legacy CLI removed; TUI is now the primary interface.
 
 ## Next Decision Points (you choose)
 

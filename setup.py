@@ -290,9 +290,7 @@ SUBTITLE_FONT_COLOR={subtitle_color}
     print("="*60)
     print("\nNext steps:")
     print("  1. Run: uv sync")
-    print("  2. Run: uv run -m src.tui.app")
-    print("     or")
-    print("     uv run cliper.py  (legacy CLI)")
+    print("  2. Run: uv run python src/tui/app.py")
     print("\n")
 
 if __name__ == "__main__":

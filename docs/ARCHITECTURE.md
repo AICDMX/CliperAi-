@@ -285,4 +285,4 @@ See deployment guides in the main documentation.
 
 ---
 
-**Need More Details?** Check the implementation in `cliper.py` for the full system architecture.
+**Need More Details?** Check the implementation in `src/tui/app.py` and `src/core/job_runner.py` for the full system architecture.

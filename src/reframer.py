@@ -21,15 +21,6 @@ Punto de integración: video_exporter.py línea ~1168
     else:
         input_for_ffmpeg = input_video  # Flujo original (center crop estático)
 
-FLAGS CLI (De dónde vienen):
-===========================
-Los flags se definen en cliper.py línea ~1068:
-    reframe_enabled = Confirm.ask("Enable intelligent face reframing?")
-    reframe_strategy = Prompt.ask("Strategy", choices=["keep_in_frame", "centered"])
-
-Luego se pasan a video_exporter.py:
-    exporter = VideoExporter(face_reframer_config={...})
-
 DECISIÓN ARQUITECTÓNICA: MediaPipe + OpenCV
 ==========================================
 PROBLEMA:

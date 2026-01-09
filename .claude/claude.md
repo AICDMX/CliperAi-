@@ -118,7 +118,7 @@ RESULTADO: Vale la complejidad - permite batch processing robusto con 90%+ tasa 
    - `00-OVERVIEW.md` - Roadmap completo
    - `01-XX.md` - Pasos específicos con checkboxes
    - `ARCHITECTURE-ALIGNMENT.md` - Verificación de integración
-4. **Validar Alineación:** Revisar código existente (video_exporter.py, cliper.py, etc.)
+4. **Validar Alineación:** Revisar código existente (video_exporter.py, src/tui/app.py, etc.)
 5. **Obtener Aprobación:** Usuario revisa antes de implementar
 
 **Ejemplo Real:** Ver `/pasoxpaso/todoPASO3/` - 8 pasos detallados para face reframing
@@ -217,7 +217,7 @@ class FaceReframer:
 1. Crear `pasoxpaso/[feature]-coments.md` si hay feedback externo
 2. Analizar:
    - Qué bibliotecas usar? Por qué?
-   - Dónde integrar? (video_exporter, cliper.py, nuevo módulo?)
+   - Dónde integrar? (video_exporter, src/tui/app.py, nuevo módulo?)
    - Qué trade-offs existen?
 3. Presentar opciones al usuario
 4. **Esperar aprobación antes de continuar**
@@ -246,7 +246,7 @@ class FaceReframer:
 - Documentar PRIMERO, implementar DESPUÉS
 - Presentar alternativas con trade-offs claros
 - Validar integración con código existente antes de proponer
-- Usar ejemplos reales del proyecto (video_exporter.py, etc.)
+- Usar ejemplos reales del proyecto (video_exporter.py, src/tui/app.py, etc.)
 - Crear pasos accionables con checkboxes, no teoría abstracta
 - Seguir patrón PASO3 para features nuevas (ben-coments → todoPASO3)
 - **Comunicación profesional y directa, SIN emojis innecesarios**
@@ -375,7 +375,7 @@ class FaceReframer:
 
 **Código de referencia actual:**
 - `src/video_exporter.py` - Punto de integración común
-- `cliper.py` - CLI entry point y flujo de usuario
+- `src/tui/app.py` - TUI entry point y flujo de usuario
 - `src/copys_generator.py` - Ejemplo de LangGraph complejo
 - `src/models/copy_schemas.py` - Patrón de validación Pydantic
 

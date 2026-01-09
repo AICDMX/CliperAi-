@@ -40,33 +40,20 @@ python setup.py --output=/etc/cliper/.env
 
 ### 3. Run CLIPER
 
-Choose your interface:
-
-**Textual TUI (Recommended):**
 ```bash
-uv run -m src.tui.app
-```
-
-**Legacy CLI (prompt-loop):**
-```bash
-uv run cliper.py
+uv run python src/tui/app.py
 ```
 
 ---
 
 ## What Happens Next?
 
-### CLI Workflow
-1. Provide a YouTube URL or local video file
-2. CLIPER processes through its pipeline
-3. Clips appear in the `output/` directory
-4. Publish directly to social platforms
-
 ### TUI Workflow
 1. Press `a` to add videos (YouTube URL or local paths)
 2. Select videos with `space`
 3. Queue jobs with `t` (transcribe), `c` (clips), `e` (export)
 4. Watch job progress + logs in the right panel
+5. Clips appear in the `output/` directory
 
 ---
 
